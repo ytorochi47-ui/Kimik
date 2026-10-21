@@ -1,0 +1,22 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'id.rexz.webtoonlite'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'id.rexz.webtoonlite'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0-mvp'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Undbundled OCR: model downloaded once by Google Play Services.
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
+}
