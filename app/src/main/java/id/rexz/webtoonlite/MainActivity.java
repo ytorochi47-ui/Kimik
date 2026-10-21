@@ -97,13 +97,20 @@ public final class MainActivity extends Activity {
         button.setEnabled(false);
         status.setText("Menghubungi Gemini ...");
         new Thread(() -> {
-            final String message;
+            String resultMessage;
             try {
-                String answer = GeminiTranslator.translate(key, "I didn't mean to hurt you.", "", "");
-                message = "Gemini tersambung. Contoh: " + answer;
+                String answer = GeminiTranslator.translate(
+                    key, "I didn't mean to hurt you.", "", ""
+                );
+                resultMessage = "Gemini tersambung. Contoh: " + answer;
             } catch (Exception e) {
-                message = "Tes gagal: " + (e.getMessage() == null ? "Periksa internet dan API key." : e.getMessage());
+                resultMessage = "Tes gagal: " +
+                    (e.getMessage() == null
+                        ? "Periksa internet dan API key."
+                        : e.getMessage());
             }
+        
+            final String message = resultMessage;
             runOnUiThread(() -> {
                 button.setEnabled(true);
                 status.setText(message);
