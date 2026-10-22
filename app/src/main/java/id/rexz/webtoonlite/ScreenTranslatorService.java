@@ -39,7 +39,11 @@ import android.widget.Toast;
 
 import java.nio.ByteBuffer;
 
-/** On-demand projection -> PP-OCRv5 (ML Kit fallback) -> Gemini (text only) -> popup. */
+/**
+ * Screen capture host. Two modes share one MediaProjection:
+ * pick-dialog (T button): on-demand projection -> PP-OCRv5 (ML Kit fallback) -> Gemini (text only) -> popup;
+ * realtime (R button): {@link RealtimeEngine} -> overlay placed over the original text.
+ */
 public final class ScreenTranslatorService extends Service {
     public static final String ACTION_START = "id.rexz.webtoonlite.START";
     public static final String ACTION_STOP = "id.rexz.webtoonlite.STOP";
@@ -63,6 +67,8 @@ public final class ScreenTranslatorService extends Service {
     private Bitmap screenshot;
     private int screenWidth, screenHeight;
     private boolean busy;
+    private RealtimeUi rtUi;            // realtime controls + translation layer
+    private RealtimeEngine rt;
 
     private int dp(float value) { return (int)(value * getResources().getDisplayMetrics().density + .5f); }
     private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
@@ -86,7 +92,7 @@ public final class ScreenTranslatorService extends Service {
         Notification notification = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_search)
                 .setContentTitle("Webtoon Lite aktif")
-                .setContentText("Ketuk tombol T untuk menerjemahkan dialog")
+                .setContentText("T: pilih dialog  •  R: terjemahan realtime")
                 .setContentIntent(pending).setOngoing(true).build();
         // startForegroundService() obliges us to call startForeground() within 5 s on
         // every start, including a repeated one while already running.
@@ -110,7 +116,7 @@ public final class ScreenTranslatorService extends Service {
             wm.getDefaultDisplay().getRealMetrics(metrics);
             screenWidth = metrics.widthPixels;
             screenHeight = metrics.heightPixels;
-            reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+            reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3);   // realtime holds one frame while the next arrives
             virtualDisplay = projection.createVirtualDisplay("WebtoonLite",
                     screenWidth, screenHeight, metrics.densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -118,6 +124,7 @@ public final class ScreenTranslatorService extends Service {
             // Stop feeding frames while idle; reattach only after user taps T.
             virtualDisplay.setSurface(null);
             showTrigger();
+            setupRealtime();
         } catch (Exception e) { toast("Tidak dapat memulai tangkap layar: " + e.getMessage()); stopSelf(); }
         return START_NOT_STICKY;
     }
@@ -170,6 +177,7 @@ public final class ScreenTranslatorService extends Service {
 
     private void requestCapture() {
         if (busy || reader == null || trigger == null) return;
+        if (rt != null && rt.state() != RealtimeEngine.State.OFF) return;   // realtime owns the projection
         busy = true;
         hideCard();
         trigger.setVisibility(View.INVISIBLE);
@@ -192,15 +200,9 @@ public final class ScreenTranslatorService extends Service {
                 else finishWithError("Layar belum siap ditangkap. Coba ketuk T lagi.");
                 return;
             }
-            Image.Plane plane = image.getPlanes()[0];
-            ByteBuffer buffer = plane.getBuffer();
-            int pixelStride = plane.getPixelStride(), rowStride = plane.getRowStride();
-            int rowPadding = rowStride - pixelStride * image.getWidth();
             // Keep the row-padded bitmap as-is: crops use the same x/y origin, so a second
             // full-screen copy (~4.6 MB on 720x1600) is unnecessary.
-            Bitmap shot = Bitmap.createBitmap(image.getWidth() + rowPadding / pixelStride,
-                    image.getHeight(), Bitmap.Config.ARGB_8888);
-            shot.copyPixelsFromBuffer(buffer);
+            Bitmap shot = FrameGrabber.padded(image);
             releaseScreenshot();
             screenshot = shot;
             if (virtualDisplay != null) virtualDisplay.setSurface(null);
@@ -285,6 +287,56 @@ public final class ScreenTranslatorService extends Service {
         p.y = dp(22);
         try { wm.addView(card,p); } catch (Exception e) { card=null; cardBody=null; toast(content); }
     }
+    // ------------------------------------------------------------------ realtime mode
+
+    private int statusBarHeight() {
+        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : 0;
+    }
+
+    private void setupRealtime() {
+        rtUi = new RealtimeUi(this, wm, screenWidth, screenHeight, new RealtimeUi.Listener() {
+            @Override public void onStart() { startRealtime(); }
+            @Override public void onPauseResume() { toggleRealtimePause(); }
+            @Override public void onStop() { stopRealtime(); }
+        });
+        rt = new RealtimeEngine(this, reader, virtualDisplay, screenWidth, screenHeight, statusBarHeight(), new RealtimeEngine.Host() {
+            @Override public void showDialogs(java.util.List<Dialog> dialogs) { if (rtUi != null) rtUi.showDialogs(dialogs); }
+            @Override public void hideDialogs() { if (rtUi != null) rtUi.hideDialogs(); }
+            @Override public int[][] overlayRects() { return rtUi == null ? new int[0][] : rtUi.overlayRects(); }
+            @Override public int[][] controlRects() { return rtUi == null ? new int[0][] : rtUi.controlRects(); }
+            @Override public void status(String text) { if (rtUi != null && !destroyed) rtUi.setStatus(text); }
+        });
+        rtUi.show(screenWidth - dp(70), screenHeight / 3 + dp(62));
+    }
+
+    private void startRealtime() {
+        if (rt == null || rtUi == null) return;
+        if (busy) { toast("Selesaikan terjemahan dialog dulu."); return; }
+        hideCard();
+        if (trigger != null) trigger.setVisibility(View.GONE);       // pick mode is paused while realtime runs
+        rtUi.startOverlay();
+        rt.start();
+        rtUi.setMode(rt.state() == RealtimeEngine.State.RUNNING ? RealtimeUi.Mode.RUNNING : RealtimeUi.Mode.IDLE);
+        if (rt.state() != RealtimeEngine.State.RUNNING) leaveRealtime();
+    }
+
+    private void toggleRealtimePause() {
+        if (rt == null || rtUi == null) return;
+        if (rt.state() == RealtimeEngine.State.RUNNING) { rt.pause(); rtUi.setMode(RealtimeUi.Mode.PAUSED); }
+        else if (rt.state() == RealtimeEngine.State.PAUSED) { rt.resume(); rtUi.setMode(RealtimeUi.Mode.RUNNING); }
+    }
+
+    private void stopRealtime() {
+        if (rt != null) rt.stop();
+        leaveRealtime();
+    }
+
+    private void leaveRealtime() {
+        if (rtUi != null) { rtUi.stopOverlay(); rtUi.setMode(RealtimeUi.Mode.IDLE); rtUi.setStatus(""); }
+        if (trigger != null) trigger.setVisibility(View.VISIBLE);
+    }
+
     private void finishWithError(String error) {
         try { if (virtualDisplay != null) virtualDisplay.setSurface(null); } catch (Exception ignored) {}
         if (cardBody == null) showCard(error);
@@ -304,6 +356,8 @@ public final class ScreenTranslatorService extends Service {
     private void safeRemove(View view) { try { wm.removeView(view); } catch (Exception ignored) { } }
     @Override public void onDestroy() {
         destroyed = true; busy=false; removeSelector(); hideCard();
+        if (rt != null) { rt.release(); rt = null; }          // detaches the surface/listener first
+        if (rtUi != null) { rtUi.destroy(); rtUi = null; }
         if(trigger != null) { safeRemove(trigger); trigger=null; }
         releaseScreenshot();
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay=null; }

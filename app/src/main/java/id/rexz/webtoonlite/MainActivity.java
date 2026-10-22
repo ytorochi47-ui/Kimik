@@ -63,8 +63,8 @@ public final class MainActivity extends Activity {
         root.addView(label("Pilih mode", 20, true));
 
         // ---- Mode Screenshot (existing behaviour, unchanged) ----
-        root.addView(label("Mode Screenshot", 17, true));
-        root.addView(label("Terjemahkan dialog di layar HP ini lewat tombol T yang melayang.", 13, false));
+        root.addView(label("Mode Screenshot & Realtime", 17, true));
+        root.addView(label("Dua tombol melayang di layar HP ini: T = pilih dialog sendiri, R = terjemahan realtime otomatis.", 13, false));
         Button start = button("Mulai translator", root);
         start.setOnClickListener(v -> startTranslate());
         Button stop = button("Hentikan translator", root);
@@ -73,7 +73,7 @@ public final class MainActivity extends Activity {
             intent.setAction(ScreenTranslatorService.ACTION_STOP);
             startService(intent);
         });
-        root.addView(label("1. Masukkan API key.\n2. Tekan Mulai dan beri izin overlay + tangkap layar.\n3. Buka webtoon di Chrome/Webtoon.\n4. Ketuk ikon T yang melayang.\n5. Seret kotak mengelilingi dialog yang sulit.\n6. Terjemahan muncul dalam popup.\n\nKetuk Stop untuk mematikan penangkapan layar.", 14, false));
+        root.addView(label("1. Masukkan API key.\n2. Tekan Mulai dan beri izin overlay + tangkap layar.\n3. Buka webtoon di Chrome/Webtoon.\n4. Ketuk ikon T yang melayang.\n5. Seret kotak mengelilingi dialog yang sulit.\n6. Terjemahan muncul dalam popup.\n\nMode Realtime: ketuk R. Setelah layar berhenti bergerak sekitar setengah detik, dialog dibaca dan diganti terjemahan Indonesia di posisinya; saat digulir, terjemahan disembunyikan lalu muncul lagi. Tombol jeda/lanjut dan stop ada di samping R.\n\nKetuk Stop untuk mematikan penangkapan layar.", 14, false));
 
         // ---- Mode Kamera (second phone) ----
         spacer(root);

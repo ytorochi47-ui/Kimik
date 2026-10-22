@@ -163,7 +163,7 @@ jobs:
           log = pathlib.Path('smoke.log')
           g = pathlib.Path('smoke-gradle.log')
           body = log.read_text(errors='replace') if log.exists() else 'smoke.log missing'
-          passed = 'SMOKE RESULT: PASS' in body
+          passed = 'SMOKE RESULT: PASS' in body and 'REALTIME RESULT: PASS' in body
           tail = '' if passed or not g.exists() else '\n--- gradle tail ---\n' + '\n'.join(g.read_text(errors='replace').splitlines()[-80:])
           print('::' + ('notice' if passed else 'error') + ' title=Native OCR smoke test::' + esc((body + tail)[-30000:]))
           pathlib.Path('smoke.passed').write_text('1' if passed else '0')

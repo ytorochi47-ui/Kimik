@@ -186,37 +186,70 @@ int WebtoonOcr::recognizeLine(const cv::Mat& rgb, OcrLine& line) {
     return 0;
 }
 
+bool WebtoonOcr::readLines(const cv::Mat& rgb, int maxTarget, size_t maxLines, std::vector<OcrLine>& done) {
+    if (rgb.empty() || rgb.type() != CV_8UC3) return false;
+
+    // Text in a user-selected balloon: keep native resolution up to maxTarget px,
+    // lift very small crops to 480 px so thin comic strokes survive the
+    // detector's /32 downsampling, and never exceed maxTarget on a 4 GB phone.
+    const int longSide = std::max(rgb.cols, rgb.rows);
+    int target = longSide;
+    if (target < 480) target = 480;
+    if (target > maxTarget) target = maxTarget;
+
+    std::vector<OcrLine> lines;
+    if (detect(rgb, lines, target) != 0 || lines.empty()) return false;
+
+    // Recognize the largest lines first and cap the work per request.
+    std::sort(lines.begin(), lines.end(), [](const OcrLine& a, const OcrLine& b) {
+        return a.rrect.size.area() > b.rrect.size.area();
+    });
+    if (lines.size() > maxLines) lines.resize(maxLines);
+
+    for (auto& l : lines) {
+        try {
+            if (recognizeLine(rgb, l) == 0 && !l.text.empty() && l.conf >= 0.30f) done.push_back(l);
+        } catch (const std::exception&) {
+            // one bad box must not lose the whole balloon
+        }
+    }
+    return !done.empty();
+}
+
+std::vector<OcrBox> WebtoonOcr::recognizeLines(const cv::Mat& rgb, int maxSide) {
+    std::vector<OcrBox> result;
+    try {
+        std::vector<OcrLine> done;
+        if (!readLines(rgb, std::max(480, std::min(maxSide, 1600)), 64, done)) return result;
+        for (const auto& l : done) {
+            cv::Point2f c[4];
+            l.rrect.points(c);
+            float x0 = c[0].x, x1 = c[0].x, y0 = c[0].y, y1 = c[0].y;
+            for (int i = 1; i < 4; i++) {
+                x0 = std::min(x0, c[i].x); x1 = std::max(x1, c[i].x);
+                y0 = std::min(y0, c[i].y); y1 = std::max(y1, c[i].y);
+            }
+            OcrBox b;
+            b.left = std::max(0, (int)std::floor(x0));
+            b.top = std::max(0, (int)std::floor(y0));
+            b.right = std::min(rgb.cols, (int)std::ceil(x1));
+            b.bottom = std::min(rgb.rows, (int)std::ceil(y1));
+            if (b.right - b.left < 2 || b.bottom - b.top < 2) continue;
+            b.conf = l.conf;
+            b.text = l.text;
+            result.push_back(b);
+        }
+    } catch (...) {
+        result.clear();
+    }
+    return result;
+}
+
 std::string WebtoonOcr::recognize(const cv::Mat& rgb, float* meanConf) {
     if (meanConf) *meanConf = 0.f;
     try {
-        if (rgb.empty() || rgb.type() != CV_8UC3) return std::string();
-
-        // Text in a user-selected balloon: keep native resolution up to 960 px,
-        // lift very small crops to 480 px so thin comic strokes survive the
-        // detector's /32 downsampling, and never exceed 960 px on a 4 GB phone.
-        const int longSide = std::max(rgb.cols, rgb.rows);
-        int target = longSide;
-        if (target < 480) target = 480;
-        if (target > 960) target = 960;
-
-        std::vector<OcrLine> lines;
-        if (detect(rgb, lines, target) != 0 || lines.empty()) return std::string();
-
-        // Recognize the largest lines first and cap the work per request.
-        std::sort(lines.begin(), lines.end(), [](const OcrLine& a, const OcrLine& b) {
-            return a.rrect.size.area() > b.rrect.size.area();
-        });
-        if (lines.size() > 24) lines.resize(24);
-
         std::vector<OcrLine> done;
-        for (auto& l : lines) {
-            try {
-                if (recognizeLine(rgb, l) == 0 && !l.text.empty() && l.conf >= 0.30f) done.push_back(l);
-            } catch (const std::exception&) {
-                // one bad box must not lose the whole balloon
-            }
-        }
-        if (done.empty()) return std::string();
+        if (!readLines(rgb, 960, 24, done)) return std::string();
 
         // Reading order: top-to-bottom. rrect short side is the (enlarged) text height,
         // so ~0.35 of it is about two thirds of a real line height.

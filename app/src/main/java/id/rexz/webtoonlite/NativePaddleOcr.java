@@ -21,8 +21,8 @@ public final class NativePaddleOcr {
 
     private NativePaddleOcr() { }
 
-    /** Must run off the main/UI thread. */
-    public static synchronized Result recognize(AssetManager assets, Bitmap bitmap) throws Exception {
+    /** Loads the library and models on first use; shared by every recognize call. */
+    private static void ensureReady(AssetManager assets) {
         if (failure != null) throw new IllegalStateException(failure);
         if (!loaded) {
             try { System.loadLibrary(LIBRARY); loaded = true; }
@@ -38,10 +38,27 @@ public final class NativePaddleOcr {
             }
             initialized = true;
         }
+    }
+
+    /** Must run off the main/UI thread. */
+    public static synchronized Result recognize(AssetManager assets, Bitmap bitmap) throws Exception {
+        ensureReady(assets);
         if (bitmap == null || bitmap.isRecycled()) throw new IllegalArgumentException("Gambar tidak tersedia.");
         byte[] utf8 = nativeRecognize(bitmap);
         String text = utf8 == null ? "" : new String(utf8, StandardCharsets.UTF_8).trim();
         return new Result(text, text.isEmpty() ? 0f : nativeLastConfidence());
+    }
+
+    /**
+     * Realtime mode: every recognized line with its box (bitmap pixels) and confidence.
+     * Same models/engine as {@link #recognize}; {@code maxSide} caps the detector input size.
+     * Must run off the main/UI thread.
+     */
+    public static synchronized java.util.List<TextBox> recognizeBoxes(AssetManager assets, Bitmap bitmap, int maxSide) throws Exception {
+        ensureReady(assets);
+        if (bitmap == null || bitmap.isRecycled()) throw new IllegalArgumentException("Gambar tidak tersedia.");
+        byte[] utf8 = nativeRecognizeLines(bitmap, maxSide);
+        return TextBox.parseNative(utf8 == null ? "" : new String(utf8, StandardCharsets.UTF_8));
     }
 
     /** Frees the ~10 MB of model weights and working buffers. Safe to call at any time. */
@@ -52,6 +69,7 @@ public final class NativePaddleOcr {
 
     private static native boolean nativeInitialize(AssetManager assets);
     private static native byte[] nativeRecognize(Bitmap bitmap);
+    private static native byte[] nativeRecognizeLines(Bitmap bitmap, int maxSide);
     private static native float nativeLastConfidence();
     private static native void nativeRelease();
 }

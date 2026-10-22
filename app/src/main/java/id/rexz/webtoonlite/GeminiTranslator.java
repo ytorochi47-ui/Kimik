@@ -8,6 +8,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /** API calls happen only when the user selects a region. Never embed an API key in the APK. */
 public final class GeminiTranslator {
@@ -36,13 +39,106 @@ public final class GeminiTranslator {
         request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", SYSTEM))));
         request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt.toString())))));
         request.put("generationConfig", new JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens));
-        return post(apiKey, request);
+        return post(apiKey, request, null);
     }
 
-    private static String post(String apiKey, JSONObject request) throws Exception {
+    // ------------------------------------------------------------------ realtime batch (text only)
+
+    private static final String BATCH_SYSTEM = SYSTEM.replace("Jawab HANYA terjemahannya.", "") +
+            "Input adalah JSON array berisi objek {\"id\":angka,\"s\":teks Inggris}. " +
+            "Jawab HANYA JSON array berisi objek {\"id\":angka,\"t\":terjemahan Indonesia} untuk setiap id, tanpa teks lain. " +
+            "Teks bisa tersambung dengan dialog lain di layar yang sama; jaga kesinambungan nada. " +
+            "Jika teks jelas bukan dialog/narasi komik (URL, menu aplikasi atau browser, jam, angka, watermark), isi t dengan string kosong.";
+
+    /** Thrown for HTTP 429 so callers can back off instead of retrying. */
+    public static final class QuotaExceededException extends Exception {
+        QuotaExceededException(String m) { super(m); }
+    }
+
+    /** Thrown when {@link CancelToken#cancel()} aborted the request. */
+    public static final class CancelledException extends Exception {
+        CancelledException() { super("Dibatalkan."); }
+    }
+
+    /** Lets a stale request be aborted from another thread (the connection is closed). */
+    public static final class CancelToken {
+        private volatile boolean cancelled;
+        private volatile HttpURLConnection conn;
+        public void cancel() { cancelled = true; HttpURLConnection c = conn; if (c != null) c.disconnect(); }
+        public boolean isCancelled() { return cancelled; }
+        void attach(HttpURLConnection c) { conn = c; if (cancelled) c.disconnect(); }
+    }
+
+    /**
+     * Translates several dialogs in ONE text-only request. {@code ids} and {@code texts} are parallel.
+     * Returns id -> Indonesian text ("" means "not a dialog, leave it alone"); ids the model skipped are absent.
+     */
+    public static Map<Integer, String> translateBatch(String apiKey, List<Integer> ids, List<String> texts,
+                                                      String history, CancelToken token) throws Exception {
+        if (ids.isEmpty() || ids.size() != texts.size()) throw new IllegalArgumentException("Batch kosong.");
+        JSONArray input = new JSONArray();
+        int chars = 0;
+        for (int i = 0; i < ids.size(); i++) {
+            String t = limit(texts.get(i).trim(), 400);
+            chars += t.length();
+            input.put(new JSONObject().put("id", ids.get(i)).put("s", t));
+        }
+        StringBuilder prompt = new StringBuilder();
+        if (history != null && !history.trim().isEmpty())
+            prompt.append("Dialog sebelumnya (hanya untuk konteks):\n").append(limit(history.trim(), 700)).append("\n\n");
+        prompt.append("Terjemahkan:\n").append(input.toString());
+        // Indonesian is ~25% longer than English; JSON framing + thinking headroom on top.
+        int maxTokens = Math.max(500, Math.min(2200, (int) (chars * 1.2) + 60 * ids.size() + 250));
+
+        JSONObject request = new JSONObject();
+        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", BATCH_SYSTEM))));
+        request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt.toString())))));
+        request.put("generationConfig", new JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens)
+                .put("responseMimeType", "application/json"));
+        String raw;
+        try { raw = post(apiKey, request, token); }
+        catch (Exception e) {
+            if (token != null && token.isCancelled()) throw new CancelledException();
+            throw e;
+        }
+        if (token != null && token.isCancelled()) throw new CancelledException();
+        return parseBatch(raw);
+    }
+
+    /** Tolerant parser: accepts a bare array, an object wrapping an array, and ```json fences. */
+    static Map<Integer, String> parseBatch(String raw) throws Exception {
+        String t = raw == null ? "" : raw.trim();
+        if (t.startsWith("```")) {
+            int nl = t.indexOf('\n');
+            if (nl > 0) t = t.substring(nl + 1);
+            if (t.endsWith("```")) t = t.substring(0, t.length() - 3);
+            t = t.trim();
+        }
+        JSONArray arr;
+        if (t.startsWith("[")) arr = new JSONArray(t);
+        else {
+            JSONObject o = new JSONObject(t);
+            arr = o.optJSONArray("translations");
+            if (arr == null) arr = o.optJSONArray("items");
+            if (arr == null) arr = o.optJSONArray("result");
+            if (arr == null) throw new Exception("Format balasan Gemini tidak dikenali.");
+        }
+        Map<Integer, String> out = new HashMap<>();
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null || !o.has("id")) continue;
+            String v = o.optString("t", o.optString("translation", o.optString("text", null)));
+            if (v == null) continue;
+            out.put(o.optInt("id"), v.trim());
+        }
+        return out;
+    }
+
+    private static String post(String apiKey, JSONObject request, CancelToken token) throws Exception {
         Exception last = null;
         for (int attempt = 0; attempt < 2; attempt++) {
-            try { return postOnce(apiKey, request); }
+            if (token != null && token.isCancelled()) throw new CancelledException();
+            try { return postOnce(apiKey, request, token); }
             catch (RetryableException e) { last = e; try { Thread.sleep(1200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; } }
         }
         throw last == null ? new Exception("Gagal menghubungi Gemini.") : last;
@@ -52,8 +148,9 @@ public final class GeminiTranslator {
         RetryableException(String m) { super(m); }
     }
 
-    private static String postOnce(String apiKey, JSONObject request) throws Exception {
+    private static String postOnce(String apiKey, JSONObject request, CancelToken token) throws Exception {
         HttpURLConnection conn = (HttpURLConnection)new URL("https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent").openConnection();
+        if (token != null) token.attach(conn);
         try {
             conn.setRequestMethod("POST"); conn.setConnectTimeout(9000); conn.setReadTimeout(20000);
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -68,7 +165,7 @@ public final class GeminiTranslator {
                 String msg = "HTTP " + status;
                 try { msg = new JSONObject(response).getJSONObject("error").optString("message", msg); }
                 catch (Exception ignored) { }
-                if (status == 429) throw new Exception("Kuota gratis/rate limit habis (429). Coba lagi nanti.");
+                if (status == 429) throw new QuotaExceededException("Kuota gratis/rate limit habis (429). Coba lagi nanti.");
                 if (status == 500 || status == 503) throw new RetryableException("Server Gemini sibuk (" + status + "). Coba lagi.");
                 throw new Exception("Gemini API: " + limit(msg, 220));
             }

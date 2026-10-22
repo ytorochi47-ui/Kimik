@@ -18,6 +18,13 @@ struct OcrLine {
     int chars = 0;
 };
 
+// One recognized text line with an axis-aligned box in input-image pixels.
+struct OcrBox {
+    int left = 0, top = 0, right = 0, bottom = 0;
+    float conf = 0.f;
+    std::string text;
+};
+
 class WebtoonOcr {
 public:
     WebtoonOcr();
@@ -31,9 +38,15 @@ public:
     // character-weighted mean confidence (0 when nothing was read).
     std::string recognize(const cv::Mat& rgb, float* meanConf);
 
+    // Same detection/recognition, but returns every line with its box (used by realtime
+    // mode, which groups lines into dialogs itself). maxSide caps the detector input.
+    std::vector<OcrBox> recognizeLines(const cv::Mat& rgb, int maxSide);
+
 private:
     int detect(const cv::Mat& rgb, std::vector<OcrLine>& out, int targetSize);
     int recognizeLine(const cv::Mat& rgb, OcrLine& line);
+    // Detect + recognize; keeps lines that read confidently. Shared by recognize()/recognizeLines().
+    bool readLines(const cv::Mat& rgb, int maxTarget, size_t maxLines, std::vector<OcrLine>& done);
 
     ncnn::Net det_;
     ncnn::Net rec_;
