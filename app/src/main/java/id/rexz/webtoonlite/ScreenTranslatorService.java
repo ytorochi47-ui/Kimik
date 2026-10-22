@@ -65,6 +65,19 @@ public final class ScreenTranslatorService extends Service {
     private ImageReader reader;
     private TextRecognizer recognizer;   // created lazily: only the fallback path needs it
     private boolean destroyed;
+    // The loaded OCR models hold >100 MB of native memory. Drop them when the reader pauses.
+    private static final long OCR_IDLE_RELEASE_MS = 90_000;
+    private final Runnable idleRelease = new Runnable() {
+        @Override public void run() {
+            if (destroyed) return;
+            if (busy) { handler.postDelayed(this, OCR_IDLE_RELEASE_MS); return; }
+            network.execute(NativePaddleOcr::release);
+        }
+    };
+    private void scheduleIdleRelease() {
+        handler.removeCallbacks(idleRelease);
+        handler.postDelayed(idleRelease, OCR_IDLE_RELEASE_MS);
+    }
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final LruCache<String, String> cache = new LruCache<>(64);
     private final LinkedList<String> history = new LinkedList<>();
@@ -263,6 +276,7 @@ public final class ScreenTranslatorService extends Service {
             final NativePaddleOcr.Result nativeResult = nat;
             handler.post(() -> {
                 if (destroyed) { crop.recycle(); return; }
+                scheduleIdleRelease();
                 if (nativeLooksGood(nativeResult)) {
                     crop.recycle();
                     sendTranslation(nativeResult.text);
@@ -394,7 +408,7 @@ public final class ScreenTranslatorService extends Service {
     }
     private void safeRemove(View view) { try { wm.removeView(view); } catch (Exception ignored) { } }
     @Override public void onDestroy() {
-        destroyed = true; busy=false; removeSelector(); hideCard();
+        destroyed = true; busy=false; handler.removeCallbacks(idleRelease); removeSelector(); hideCard();
         if(trigger != null) { safeRemove(trigger); trigger=null; }
         releaseScreenshot();
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay=null; }

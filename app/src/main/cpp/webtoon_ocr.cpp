@@ -229,6 +229,7 @@ std::string WebtoonOcr::recognize(const cv::Mat& rgb, float* meanConf) {
         std::sort(done.begin(), done.end(), [](const OcrLine& a, const OcrLine& b) {
             return a.rrect.center.y < b.rrect.center.y;
         });
+        std::vector<size_t> rowBreak;  // indices where a new text row starts
         size_t rowStart = 0;
         for (size_t i = 1; i <= done.size(); i++) {
             if (i == done.size() ||
@@ -237,18 +238,24 @@ std::string WebtoonOcr::recognize(const cv::Mat& rgb, float* meanConf) {
                           [](const OcrLine& a, const OcrLine& b) {
                               return a.rrect.center.x < b.rrect.center.x;
                           });
+                rowBreak.push_back(rowStart);
                 rowStart = i;
             }
         }
 
+        // Boxes on the same row (e.g. words of stylised or white-on-dark text that the
+        // detector split) are joined with spaces; separate rows with newlines.
         std::string result;
         double confSum = 0;
         int chars = 0;
-        for (const auto& l : done) {
-            if (!result.empty()) result.push_back('\n');
-            result += l.text;
-            confSum += (double)l.conf * l.chars;
-            chars += l.chars;
+        size_t nextBreak = 0;
+        for (size_t i = 0; i < done.size(); i++) {
+            const bool newRow = nextBreak < rowBreak.size() && rowBreak[nextBreak] == i;
+            if (newRow) nextBreak++;
+            if (!result.empty()) result.push_back(newRow ? '\n' : ' ');
+            result += done[i].text;
+            confSum += (double)done[i].conf * done[i].chars;
+            chars += done[i].chars;
         }
         if (meanConf && chars > 0) *meanConf = (float)(confSum / chars);
         return result;

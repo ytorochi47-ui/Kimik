@@ -106,10 +106,12 @@ public class NativeOcrSmokeTest {
                 bmp.recycle();
                 String want = norm(String.join("", lines)), got = norm(r.text);
                 int dist = lev(want, got);
-                boolean pass = dist <= Math.max(2, want.length() / 8);
+                // Row structure: words on one line must not be split by newlines.
+                int newlines = r.text.length() - r.text.replace("\n", "").length();
+                boolean pass = dist <= Math.max(2, want.length() / 8) && newlines == lines.length - 1;
                 ok &= pass;
                 report.append(pass ? "OK   " : "FAIL ").append(ms).append(" ms conf=").append(String.format(Locale.ROOT, "%.2f", r.confidence))
-                      .append(" dist=").append(dist).append(" | want=").append(String.join(" / ", lines))
+                      .append(" dist=").append(dist).append(" rows=").append(newlines + 1).append(" | want=").append(String.join(" / ", lines))
                       .append(" | got=").append(r.text.replace('\n', '/')).append('\n');
             }
             long nativeAfter = Debug.getNativeHeapAllocatedSize();

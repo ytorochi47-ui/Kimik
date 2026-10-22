@@ -1,31 +1,35 @@
-# WebtoonLite v0.2 – OCR Komik (PP-OCRv5 CPU)
+# WebtoonLite v0.3 – OCR komik lokal (PP-OCRv5) + terjemahan Gemini
 
-Optimasi untuk Android RAM 4 GB, tangkap area dialog **atas permintaan**, OCR lokal **PP-OCRv5 mobile** dan fallback ML Kit, kirim **teks saja** ke Gemini untuk terjemahan. Tidak ada Gemini Vision / token gambar.
+Penerjemah webtoon Inggris → Indonesia untuk Android 8+ (diuji target: vivo Y20 2021, Android 11, RAM 4 GB). Biaya Rp0: OCR berjalan di perangkat, hanya **teks** hasil OCR yang dikirim ke Gemini (tidak ada Gemini Vision, tidak ada gambar yang diunggah).
 
-## Pembuatan APK otomatis (gratis)
+## Alur runtime
 
-1. Upload **isi folder WebtoonLite** ke GitHub privat. Jangan upload API key.
-2. Pastikan `.github/workflows/build-android-apk.yml` ikut diupload. Untuk file tersembunyi buat langsung dari **Add file → Create new file**.
-3. Buka **Actions → Build Android APK (Free)** dan jalankan `Run workflow`.
-4. Kalau workflow hijau, unduh artifact `WebtoonLite-Android11-APK`, ekstrak dan install `WebtoonLite-debug.apk`.
+Ketuk **T** → layar ditangkap sekali → seret kotak di sekitar dialog → hanya area itu di-crop → **PP-OCRv5 Mobile (ncnn, CPU)** → bila hasil kosong/kurang yakin (confidence < 0,55 atau tak ada kata) **ML Kit** sebagai cadangan → teks dikirim ke Gemini → terjemahan tampil di popup.
 
-**Perubahan v0.2:** saat build, script `scripts/prepare_native_ocr.py` mengunduh PP-OCRv5 Mobile `ppocrv5.cpp/.h`, dictionary dan empat file model dari revisi upstream yang dipin, serta ncnn CPU dan OpenCV Mobile. Semua itu terjadi dalam GitHub Actions, tanpa harus memasukkan model berukuran besar ke repository GitHub secara manual. Butuh jaringan CI untuk mengunduhnya.
+- Model PP-OCRv5 dimuat saat pertama dipakai dan **dilepas otomatis setelah 90 detik tanpa aktivitas** atau saat translator dihentikan (model aktif memakai >100 MB memori native).
+- Crop kecil dinaikkan skalanya (≥ 480 px sisi terpanjang), crop besar dibatasi 960 px supaya RAM dan waktu tetap terkendali.
+- Kotak teks pada baris yang sama digabung dengan spasi, antarbaris dengan baris baru.
+- Permintaan Gemini ringkas: instruksi singkat, ≤ 2 dialog sebelumnya sebagai konteks, batas token keluaran mengikuti panjang teks, cache lokal untuk teks yang sama.
 
-**Catatan kompatibilitas:** saat ini paket ditargetkan ke `arm64-v8a` (perlu Android OS 64-bit; chipset 64-bit saja belum cukup). Jika HP menggunakan OS 32-bit, APK ini tidak bisa dipasang. Min Android API 26, maksimal target SDK 34. Backend CPU-only. APK dapat lebih besar daripada v0.1 karena dua native library serta bobot model (~10.6 MB).
+## Build APK (gratis, GitHub Actions)
 
-**Cakupan:** untuk dialog Inggris horizontal, bukan aksara Korea, efek suara sangat artistik, maupun panel penuh. Jangan menganggap target angka tertentu adalah jaminan OCR komik.
+1. Push ke `main` (atau jalankan **Actions → Build Android APK (Free) → Run workflow**).
+2. Job `build` mengunduh model/library dengan **SHA-256 terpin** (`scripts/prepare_native_ocr.py`), mengompilasi APK `arm64-v8a` + `armeabi-v7a`, lalu memeriksa isi APK (library native kedua ABI ada, model tersimpan tanpa kompresi, tidak ada pola API key).
+3. Job `smoke-test` menjalankan jalur native yang sama (assets → JNI → ncnn → PP-OCRv5) di emulator Android 11 x86_64 dan memeriksa hasil OCR.
+4. Unduh artifact **WebtoonLite-Android11-APK** → `WebtoonLite-debug.apk`.
 
-## Tahapan runtime
+API key Gemini **tidak** ada di source/APK: dimasukkan lewat aplikasi dan disimpan terenkripsi (Android Keystore).
 
-T → pilih kotak → hanya crop terpilih → OCR lokal PP-OCRv5 → fallback ML Kit jika kosong → Gemini menerima teks → popup Indonesia. Model OCR dimuat ketika pertama digunakan, dan pemrosesan dilakukan di thread terpisah.
+## Batasan yang perlu diketahui
 
-## Source pihak ketiga
+- Dirancang untuk teks Inggris horizontal. Aksara non-Latin, efek suara sangat artistik, dan panel penuh bukan target.
+- Akurasi pada font komik yang sangat dekoratif tidak bisa dijamin; uji otomatis hanya memakai font sistem Android (bersih, putih-di-gelap, bergaris tepi).
+- Kecepatan di ponsel sungguhan belum diukur (smoke test berjalan di emulator x86_64).
+- Alur tangkap layar/overlay (MediaProjection) membutuhkan interaksi pengguna dan tidak diuji otomatis.
 
-- https://github.com/nihui/ncnn-android-ppocrv5 (PP-OCRv5 Android, kode native mengikuti ketentuan BSD-3-Clause)
+## Pihak ketiga
+
+- https://github.com/nihui/ncnn-android-ppocrv5 (model & kamus PP-OCRv5; logika deteksi/pengenalan diadaptasi di `webtoon_ocr.cpp`, BSD-3-Clause)
 - https://github.com/Tencent/ncnn (BSD-3-Clause)
-- https://github.com/nihui/opencv-mobile (OpenCV, lisensi sesuai upstream)
+- https://github.com/nihui/opencv-mobile (lisensi sesuai upstream)
 - https://github.com/PaddlePaddle/PaddleOCR
-
-## Status verifikasi
-
-Source ini belum dijalankan melalui Android Gradle build di lingkungan pembuatan file ini; kompilasi dan pengujian fisik perlu dilakukan via workflow GitHub Actions. Jika workflow gagal, lihat langkah merah dan log-nya. Tidak ada API key Gemini dalam file proyek.
