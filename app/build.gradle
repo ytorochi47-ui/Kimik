@@ -12,8 +12,8 @@ android {
         // CI smoke test passes -Pabis=x86_64 to run the same native code on an emulator.
         ndk { abiFilters(*(project.hasProperty('abis') ? project.property('abis').toString().split(',') : ['arm64-v8a', 'armeabi-v7a'])) }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
-        versionCode 4
-        versionName '0.4.0-camera'
+        versionCode 5
+        versionName '0.5.0-realtime'
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++17'

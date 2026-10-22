@@ -1,4 +1,4 @@
-# WebtoonLite v0.4 – OCR komik lokal (PP-OCRv5) + terjemahan Gemini, mode Screenshot & Kamera
+# WebtoonLite v0.5 – OCR komik lokal (PP-OCRv5) + terjemahan Gemini: Pilih Dialog, Kamera, Realtime
 
 Penerjemah webtoon Inggris → Indonesia untuk Android 8+ (diuji target: vivo Y20 2021, Android 11, RAM 4 GB). Biaya Rp0: OCR berjalan di perangkat, hanya **teks** hasil OCR yang dikirim ke Gemini (tidak ada Gemini Vision, tidak ada gambar yang diunggah).
 
@@ -12,6 +12,19 @@ Penerjemah webtoon Inggris → Indonesia untuk Android 8+ (diuji target: vivo Y2
 | Pipeline OCR + terjemahan | `OcrTranslator` (sama persis) | `OcrTranslator` (sama persis) |
 
 Mode Kamera: live preview 4:3, ketuk layar untuk fokus, tombol **Capture** → foto diambil **di memori** (tidak pernah ditulis ke penyimpanan) dan dibekukan (sisi terpanjang ≤ 2560 px, orientasi dikoreksi) → pilih area dialog → hanya crop itu dibaca → terjemahan tampil dengan tombol **Salin**, **Area lain**, **Kembali ke kamera** (dan **Ulangi foto** saat memilih area). Kamera dilepas selama gambar beku; OCR tidak pernah berjalan pada preview.
+
+## Mode Realtime (tombol R)
+
+Satu sesi tangkap layar menyediakan dua tombol melayang: **T** (pilih dialog, tidak berubah) dan **R** (realtime). Saat realtime berjalan, T disembunyikan dan muncul tombol **jeda/lanjut** dan **stop**; baris status kecil menampilkan "Membaca teks…", "Menerjemahkan…", "Offline", atau "Kuota habis".
+
+Cara kerja (tanpa loop OCR):
+1. `VirtualDisplay` hanya mengirim frame saat layar berubah. Tiap frame dijadikan sidik luma kecil (54x120 titik); perubahan >1,2 % titik = layar berubah/scroll. Area overlay terjemahan dan tombol kontrol dikecualikan dari perbandingan, jadi overlay sendiri tidak pernah dianggap perubahan.
+2. Saat berubah, overlay langsung disembunyikan. Setelah layar diam 500 ms, satu frame bebas-overlay dibaca PP-OCRv5 (maks 1 OCR per 1,2 dtk, sisi terpanjang 1280 px, bar status dipotong). Jika layar kembali ke halaman yang sama, overlay dipulihkan tanpa OCR.
+3. Baris dikelompokkan menjadi dialog (`DialogGrouper`), UI/URL/angka disaring (`DialogFilter`), warna latar diambil dari median piksel di sekeliling dialog.
+4. Dialog baru dikirim **satu batch** JSON `[{id,s}]` (teks saja) ke Gemini; balasan `[{id,t}]`. Cache per teks (200 entri) + dedup + request usang dibatalkan (koneksi diputus) bila layar sudah pindah; jeda 2 dtk antar request; backoff offline 4→30 dtk; kuota 429 → jeda 60 dtk.
+5. Overlay (`TranslationOverlayView`) adalah jendela non-touchable; ukuran huruf disesuaikan ke kotak, kotak hanya membesar (maks +50 %) bila perlu.
+
+Mode Pilih Dialog dan Mode Kamera memakai jalur yang sama seperti sebelumnya (`OcrTranslator`); Realtime memakai mesin OCR yang sama lewat `NativePaddleOcr.recognizeBoxes` (tambahan JNI aditif).
 
 ## Alur runtime (Mode Screenshot)
 
