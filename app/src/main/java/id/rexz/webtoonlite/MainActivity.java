@@ -59,6 +59,12 @@ public final class MainActivity extends Activity {
         root.addView(apiStatus);
         Button test = button("Tes koneksi Gemini", root);
         test.setOnClickListener(v -> testApi(test, apiStatus));
+        spacer(root);
+        root.addView(label("Pilih mode", 20, true));
+
+        // ---- Mode Screenshot (existing behaviour, unchanged) ----
+        root.addView(label("Mode Screenshot", 17, true));
+        root.addView(label("Terjemahkan dialog di layar HP ini lewat tombol T yang melayang.", 13, false));
         Button start = button("Mulai translator", root);
         start.setOnClickListener(v -> startTranslate());
         Button stop = button("Hentikan translator", root);
@@ -67,9 +73,14 @@ public final class MainActivity extends Activity {
             intent.setAction(ScreenTranslatorService.ACTION_STOP);
             startService(intent);
         });
-        spacer(root);
-        root.addView(label("Cara pakai", 17, true));
         root.addView(label("1. Masukkan API key.\n2. Tekan Mulai dan beri izin overlay + tangkap layar.\n3. Buka webtoon di Chrome/Webtoon.\n4. Ketuk ikon T yang melayang.\n5. Seret kotak mengelilingi dialog yang sulit.\n6. Terjemahan muncul dalam popup.\n\nKetuk Stop untuk mematikan penangkapan layar.", 14, false));
+
+        // ---- Mode Kamera (second phone) ----
+        spacer(root);
+        root.addView(label("Mode Kamera (HP kedua)", 17, true));
+        root.addView(label("Arahkan kamera belakang ke layar HP lain, ambil foto, lalu pilih dialognya. Hanya butuh izin kamera; foto tidak disimpan.", 13, false));
+        Button camera = button("Buka Mode Kamera", root);
+        camera.setOnClickListener(v -> openCameraMode());
         setContentView(scroll);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIF);
@@ -112,11 +123,23 @@ public final class MainActivity extends Activity {
         }, "gemini-api-check").start();
     }
 
-    private void startTranslate() {
+    /** Validates and stores the key (encrypted). Shared by both modes; shows its own error toast. */
+    private boolean saveKeyOrWarn() {
         String key = keyField.getText().toString().trim();
-        if (key.length() < 15) { Toast.makeText(this, "Masukkan kunci API Gemini milikmu dahulu.", Toast.LENGTH_LONG).show(); return; }
+        if (key.length() < 15) { Toast.makeText(this, "Masukkan kunci API Gemini milikmu dahulu.", Toast.LENGTH_LONG).show(); return false; }
         try { keyStore.save(key); }
-        catch (Exception ex) { Toast.makeText(this, "Gagal menyimpan kunci secara aman: " + ex.getMessage(), Toast.LENGTH_LONG).show(); return; }
+        catch (Exception ex) { Toast.makeText(this, "Gagal menyimpan kunci secara aman: " + ex.getMessage(), Toast.LENGTH_LONG).show(); return false; }
+        return true;
+    }
+
+    /** Camera mode needs only the CAMERA permission (asked inside the camera screen): no overlay, no projection. */
+    private void openCameraMode() {
+        if (!saveKeyOrWarn()) return;
+        startActivity(new Intent(this, CameraTranslateActivity.class));
+    }
+
+    private void startTranslate() {
+        if (!saveKeyOrWarn()) return;
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Aktifkan izin tampil di atas aplikasi lain, lalu kembali dan tekan Mulai lagi.", Toast.LENGTH_LONG).show();
             Intent overlay = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));

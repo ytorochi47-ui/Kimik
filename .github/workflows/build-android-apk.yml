@@ -45,6 +45,9 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
+      - name: Unit tests (crop math, OCR acceptance rule)
+        run: gradle --no-daemon :app:testDebugUnitTest
+
       - name: Compile signed debug APK
         run: |
           set -o pipefail

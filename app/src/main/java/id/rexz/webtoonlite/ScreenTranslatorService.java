@@ -27,7 +27,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.DisplayMetrics;
-import android.util.LruCache;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -38,17 +37,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.google.android.gms.tasks.Task;
-import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.TextRecognizer;
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
-
 import java.nio.ByteBuffer;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /** On-demand projection -> PP-OCRv5 (ML Kit fallback) -> Gemini (text only) -> popup. */
 public final class ScreenTranslatorService extends Service {
@@ -63,24 +52,8 @@ public final class ScreenTranslatorService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader reader;
-    private TextRecognizer recognizer;   // created lazily: only the fallback path needs it
+    private OcrTranslator translator;   // shared pipeline (also used by camera mode); created in onCreate
     private boolean destroyed;
-    // The loaded OCR models hold >100 MB of native memory. Drop them when the reader pauses.
-    private static final long OCR_IDLE_RELEASE_MS = 90_000;
-    private final Runnable idleRelease = new Runnable() {
-        @Override public void run() {
-            if (destroyed) return;
-            if (busy) { handler.postDelayed(this, OCR_IDLE_RELEASE_MS); return; }
-            network.execute(NativePaddleOcr::release);
-        }
-    };
-    private void scheduleIdleRelease() {
-        handler.removeCallbacks(idleRelease);
-        handler.postDelayed(idleRelease, OCR_IDLE_RELEASE_MS);
-    }
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
-    private final LruCache<String, String> cache = new LruCache<>(64);
-    private final LinkedList<String> history = new LinkedList<>();
     private TextView trigger;
     private WindowManager.LayoutParams triggerParams;
     private SelectionOverlay selector;
@@ -98,6 +71,7 @@ public final class ScreenTranslatorService extends Service {
         super.onCreate();
         wm = (WindowManager)getSystemService(WINDOW_SERVICE);
         handler = new Handler(Looper.getMainLooper());
+        translator = new OcrTranslator(this);
         NotificationManager mgr = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) mgr.createNotificationChannel(new NotificationChannel(
                 CHANNEL, "Webtoon Lite — tangkap layar", NotificationManager.IMPORTANCE_LOW));
@@ -244,11 +218,6 @@ public final class ScreenTranslatorService extends Service {
         wm.addView(selector, p);
     }
 
-    /** Native OCR is trusted when it read real words with decent confidence. */
-    private static boolean nativeLooksGood(NativePaddleOcr.Result r) {
-        return r != null && r.confidence >= 0.55f && r.text.matches("(?s).*\\p{L}{2,}.*");
-    }
-
     private void analyze(Rect region) {
         final Bitmap frame = screenshot;
         if (frame == null || frame.isRecycled()) { finishWithError("Frame tidak tersedia."); return; }
@@ -265,90 +234,16 @@ public final class ScreenTranslatorService extends Service {
         } catch (Exception e) {
             finishWithError("Gagal memotong balon: " + e.getMessage()); return;
         }
-        network.execute(() -> {
-            NativePaddleOcr.Result nat = null;
-            try {
-                nat = NativePaddleOcr.recognize(getAssets(), crop);
-            } catch (Exception | UnsatisfiedLinkError ex) {
-                // Stay usable if this device cannot load the native backend.
-                android.util.Log.w("WebtoonLite", "Native OCR failed; using ML Kit", ex);
+        // OCR (PP-OCRv5 -> ML Kit fallback) + text-only Gemini live in OcrTranslator.
+        translator.translate(crop, new OcrTranslator.Callback() {
+            @Override public void onStatus(String message) { if (cardBody != null) cardBody.setText(message); }
+            @Override public void onResult(String source, String translation, boolean fromCache) {
+                if (!destroyed) showTranslation(source, translation, fromCache);
             }
-            final NativePaddleOcr.Result nativeResult = nat;
-            handler.post(() -> {
-                if (destroyed) { crop.recycle(); return; }
-                scheduleIdleRelease();
-                if (nativeLooksGood(nativeResult)) {
-                    crop.recycle();
-                    sendTranslation(nativeResult.text);
-                } else {
-                    runMlKitFallback(crop, nativeResult);
-                }
-            });
+            @Override public void onError(String message) { if (!destroyed) finishWithError(message); }
         });
     }
 
-    /** ML Kit is only a fallback for crops the PP-OCRv5 pass could not read confidently. */
-    private void runMlKitFallback(Bitmap crop, NativePaddleOcr.Result nativeResult) {
-        final String weakNative = nativeResult == null ? "" : nativeResult.text;
-        try {
-            if (recognizer == null)
-                recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            recognizer.process(InputImage.fromBitmap(crop, 0))
-                    .addOnSuccessListener(text -> {
-                        String fallback = text.getText().trim();
-                        if (!fallback.isEmpty()) sendTranslation(fallback);
-                        else if (!weakNative.isEmpty() && !weakNative.matches("[\\p{Punct}\\s]+")) sendTranslation(weakNative);
-                        else finishWithError("Teks belum terbaca. Coba pilih area sedikit lebih rapat.");
-                    })
-                    .addOnFailureListener(err -> {
-                        if (!weakNative.isEmpty() && !weakNative.matches("[\\p{Punct}\\s]+")) sendTranslation(weakNative);
-                        else finishWithError("OCR gagal: " + err.getMessage());
-                    })
-                    .addOnCompleteListener(done -> crop.recycle());
-        } catch (Exception e) {
-            crop.recycle();
-            finishWithError("OCR gagal: " + e.getMessage());
-        }
-    }
-
-    private static String normalizeKey(String s) {
-        return s.trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
-    }
-
-    private void sendTranslation(String target) {
-        if (destroyed) return;
-        if (target.trim().isEmpty()) { finishWithError("Teks kosong."); return; }
-        final String cacheKey = normalizeKey(target);
-        String cached = cache.get(cacheKey);
-        if (cached != null) { showTranslation(target, cached, true); return; }
-        if (cardBody != null) cardBody.setText("Menerjemahkan ...");
-        final String previous = historyText();
-        network.execute(() -> {
-            String translation;
-            try {
-                String key = new SecureKeyStore(this).load();
-                if (key.isEmpty()) throw new Exception("API key belum disimpan.");
-                translation = GeminiTranslator.translate(key, target, previous);
-            } catch (Exception e) {
-                final String message = e.getMessage() == null ? "Gagal menghubungi AI." : e.getMessage();
-                handler.post(() -> { if (!destroyed) finishWithError(message); }); return;
-            }
-            final String result = translation;
-            handler.post(() -> {
-                if (destroyed) return;
-                cache.put(cacheKey, result);
-                history.addFirst(clip(target, 220) + " => " + clip(result, 220));
-                while (history.size() > 2) history.removeLast();
-                showTranslation(target, result, false);
-            });
-        });
-    }
-    private static String clip(String s, int max) { return s.length() > max ? s.substring(0, max) : s; }
-    private String historyText() {
-        StringBuilder historyText = new StringBuilder();
-        for (String item : history) historyText.append(item).append('\n');
-        return historyText.toString();
-    }
     private void showTranslation(String source, String result, boolean cached) {
         cardResult = result;
         if (cardBody != null) cardBody.setText((cached ? "⚡ Cache lokal\n\n" : "") + result + "\n\nAsli: " + source);
@@ -408,16 +303,13 @@ public final class ScreenTranslatorService extends Service {
     }
     private void safeRemove(View view) { try { wm.removeView(view); } catch (Exception ignored) { } }
     @Override public void onDestroy() {
-        destroyed = true; busy=false; handler.removeCallbacks(idleRelease); removeSelector(); hideCard();
+        destroyed = true; busy=false; removeSelector(); hideCard();
         if(trigger != null) { safeRemove(trigger); trigger=null; }
         releaseScreenshot();
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay=null; }
         if (reader != null) { reader.close(); reader=null; }
         if (projection != null) { MediaProjection p=projection; projection=null; p.stop(); }
-        if(recognizer != null) { recognizer.close(); recognizer=null; }
-        // Free the OCR models (~10 MB) once any running OCR/translation has finished.
-        network.execute(NativePaddleOcr::release);
-        network.shutdown();
+        if (translator != null) translator.shutdown();   // closes ML Kit and frees the OCR models once idle
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent) { return null; }

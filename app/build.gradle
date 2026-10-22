@@ -12,8 +12,8 @@ android {
         // CI smoke test passes -Pabis=x86_64 to run the same native code on an emulator.
         ndk { abiFilters(*(project.hasProperty('abis') ? project.property('abis').toString().split(',') : ['arm64-v8a', 'armeabi-v7a'])) }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
-        versionCode 3
-        versionName '0.3.0-ppocrv5'
+        versionCode 4
+        versionName '0.4.0-camera'
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++17'
@@ -42,6 +42,16 @@ dependencies {
     // Fallback OCR only. Unbundled: the model is downloaded once by Google Play Services.
     implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
 
+    // Camera mode (CameraX, back camera only).
+    def camerax = '1.4.2'
+    implementation "androidx.camera:camera-core:$camerax"
+    implementation "androidx.camera:camera-camera2:$camerax"
+    implementation "androidx.camera:camera-lifecycle:$camerax"
+    implementation "androidx.camera:camera-view:$camerax"
+    implementation 'androidx.activity:activity:1.9.3'
+    implementation 'com.google.guava:listenablefuture:1.0'
+
+    testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
     androidTestImplementation 'androidx.test:runner:1.6.2'
 }
