@@ -40,21 +40,17 @@ import android.widget.Toast;
 
 import com.google.android.gms.tasks.Task;
 import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Lightweight on-demand projection -> ML Kit OCR -> Gemini -> popup. */
+/** On-demand projection -> PP-OCRv5 (ML Kit fallback) -> Gemini (text only) -> popup. */
 public final class ScreenTranslatorService extends Service {
     public static final String ACTION_START = "id.rexz.webtoonlite.START";
     public static final String ACTION_STOP = "id.rexz.webtoonlite.STOP";
@@ -67,7 +63,8 @@ public final class ScreenTranslatorService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader reader;
-    private TextRecognizer recognizer;
+    private TextRecognizer recognizer;   // created lazily: only the fallback path needs it
+    private boolean destroyed;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final LruCache<String, String> cache = new LruCache<>(64);
     private final LinkedList<String> history = new LinkedList<>();
@@ -88,7 +85,6 @@ public final class ScreenTranslatorService extends Service {
         super.onCreate();
         wm = (WindowManager)getSystemService(WINDOW_SERVICE);
         handler = new Handler(Looper.getMainLooper());
-        recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         NotificationManager mgr = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) mgr.createNotificationChannel(new NotificationChannel(
                 CHANNEL, "Webtoon Lite — tangkap layar", NotificationManager.IMPORTANCE_LOW));
@@ -97,7 +93,6 @@ public final class ScreenTranslatorService extends Service {
         if (intent == null) return START_NOT_STICKY;
         if (ACTION_STOP.equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
         if (!ACTION_START.equals(intent.getAction())) return START_NOT_STICKY;
-        if (projection != null) { toast("Translator sudah aktif."); return START_NOT_STICKY; }
         Intent launch = new Intent(this, MainActivity.class);
         PendingIntent pending = PendingIntent.getActivity(this, 0, launch,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -106,10 +101,15 @@ public final class ScreenTranslatorService extends Service {
                 .setContentTitle("Webtoon Lite aktif")
                 .setContentText("Ketuk tombol T untuk menerjemahkan dialog")
                 .setContentIntent(pending).setOngoing(true).build();
+        // startForegroundService() obliges us to call startForeground() within 5 s on
+        // every start, including a repeated one while already running.
         try {
             if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
             else startForeground(NOTIFICATION_ID, notification);
+        } catch (Exception e) { toast("Tidak dapat memulai layanan: " + e.getMessage()); stopSelf(); return START_NOT_STICKY; }
+        if (projection != null) { toast("Translator sudah aktif."); return START_NOT_STICKY; }
+        try {
             int code = intent.getIntExtra(EXTRA_CODE, 0);
             Intent data = (Intent)intent.getParcelableExtra(EXTRA_DATA);
             if (code == 0 || data == null) throw new IllegalArgumentException("Izin tangkap layar tidak tersedia.");
@@ -209,11 +209,13 @@ public final class ScreenTranslatorService extends Service {
             ByteBuffer buffer = plane.getBuffer();
             int pixelStride = plane.getPixelStride(), rowStride = plane.getRowStride();
             int rowPadding = rowStride - pixelStride * image.getWidth();
-            Bitmap padded = Bitmap.createBitmap(image.getWidth() + rowPadding / pixelStride,
+            // Keep the row-padded bitmap as-is: crops use the same x/y origin, so a second
+            // full-screen copy (~4.6 MB on 720x1600) is unnecessary.
+            Bitmap shot = Bitmap.createBitmap(image.getWidth() + rowPadding / pixelStride,
                     image.getHeight(), Bitmap.Config.ARGB_8888);
-            padded.copyPixelsFromBuffer(buffer);
-            screenshot = Bitmap.createBitmap(padded, 0, 0, image.getWidth(), image.getHeight());
-            padded.recycle();
+            shot.copyPixelsFromBuffer(buffer);
+            releaseScreenshot();
+            screenshot = shot;
             if (virtualDisplay != null) virtualDisplay.setSurface(null);
             showSelector();
         } catch (Exception e) { finishWithError("Screenshot gagal: " + e.getMessage()); }
@@ -229,102 +231,108 @@ public final class ScreenTranslatorService extends Service {
         wm.addView(selector, p);
     }
 
+    /** Native OCR is trusted when it read real words with decent confidence. */
+    private static boolean nativeLooksGood(NativePaddleOcr.Result r) {
+        return r != null && r.confidence >= 0.55f && r.text.matches("(?s).*\\p{L}{2,}.*");
+    }
+
     private void analyze(Rect region) {
         final Bitmap frame = screenshot;
         if (frame == null || frame.isRecycled()) { finishWithError("Frame tidak tersedia."); return; }
-        region.intersect(0, 0, frame.getWidth(), frame.getHeight());
-        if (region.width() < 20 || region.height() < 20) { finishWithError("Kotak terlalu kecil."); return; }
-        showCard("Membaca dialog ...");
-        Task<Text> task = recognizer.process(InputImage.fromBitmap(frame, 0));
-        task.addOnSuccessListener(text -> {
-            OCRResult parsed = selectText(text, region);
-            if (parsed.target.isEmpty()) {
-                // Full-screen recognition can miss stylized small lettering. Retry on crop.
-                Bitmap crop = Bitmap.createBitmap(frame, region.left, region.top, region.width(), region.height());
-                recognizer.process(InputImage.fromBitmap(crop, 0))
-                        .addOnSuccessListener(extra -> {
-                            String found = extra.getText().trim();
-                            if (found.isEmpty()) finishWithError("Tidak ada teks terbaca. Coba kotak yang lebih rapat dan lebih besar.");
-                            else sendTranslation(found, parsed.nearby);
-                        })
-                        .addOnFailureListener(err -> finishWithError("OCR gagal: " + err.getMessage()))
-                        .addOnCompleteListener(done -> { crop.recycle(); releaseScreenshot(); });
-            } else {
-                releaseScreenshot();
-                sendTranslation(parsed.target, parsed.nearby);
+        if (!region.intersect(0, 0, Math.min(screenWidth, frame.getWidth()), frame.getHeight()) ||
+            region.width() < 20 || region.height() < 20) {
+            finishWithError("Kotak terlalu kecil."); return;
+        }
+        showCard("Membaca teks dengan PP-OCRv5 ...");
+        // Work ONLY on the selected region; no full-screen OCR.
+        final Bitmap crop;
+        try {
+            crop = Bitmap.createBitmap(frame, region.left, region.top, region.width(), region.height());
+            releaseScreenshot();
+        } catch (Exception e) {
+            finishWithError("Gagal memotong balon: " + e.getMessage()); return;
+        }
+        network.execute(() -> {
+            NativePaddleOcr.Result nat = null;
+            try {
+                nat = NativePaddleOcr.recognize(getAssets(), crop);
+            } catch (Exception | UnsatisfiedLinkError ex) {
+                // Stay usable if this device cannot load the native backend.
+                android.util.Log.w("WebtoonLite", "Native OCR failed; using ML Kit", ex);
             }
-        }).addOnFailureListener(e -> finishWithError("OCR gagal: " + e.getMessage()))
-          .addOnCompleteListener(done -> {
-              // Screen bitmap retained through fallback OCR when needed.
-              if (!done.isSuccessful()) releaseScreenshot();
-          });
+            final NativePaddleOcr.Result nativeResult = nat;
+            handler.post(() -> {
+                if (destroyed) { crop.recycle(); return; }
+                if (nativeLooksGood(nativeResult)) {
+                    crop.recycle();
+                    sendTranslation(nativeResult.text);
+                } else {
+                    runMlKitFallback(crop, nativeResult);
+                }
+            });
+        });
     }
 
-    private static final class Line {
-        String content; Rect rect;
-        Line(String s, Rect r) { content=s; rect=r; }
-    }
-    private static final class OCRResult { String target="", nearby=""; }
-    private OCRResult selectText(Text recognized, Rect selected) {
-        ArrayList<Line> lines = new ArrayList<>();
-        for (Text.TextBlock block : recognized.getTextBlocks())
-            for (Text.Line ln : block.getLines()) {
-                Rect r = ln.getBoundingBox();
-                if (r != null && !ln.getText().trim().isEmpty()) lines.add(new Line(ln.getText().trim(),r));
-            }
-        Collections.sort(lines, Comparator.comparingInt((Line l) -> l.rect.top).thenComparingInt(l -> l.rect.left));
-        StringBuilder target = new StringBuilder();
-        ArrayList<Line> other = new ArrayList<>();
-        for (Line l : lines) {
-            if (Rect.intersects(selected, l.rect)) {
-                if (target.length() > 0) target.append('\n');
-                target.append(l.content);
-            } else other.add(l);
+    /** ML Kit is only a fallback for crops the PP-OCRv5 pass could not read confidently. */
+    private void runMlKitFallback(Bitmap crop, NativePaddleOcr.Result nativeResult) {
+        final String weakNative = nativeResult == null ? "" : nativeResult.text;
+        try {
+            if (recognizer == null)
+                recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+            recognizer.process(InputImage.fromBitmap(crop, 0))
+                    .addOnSuccessListener(text -> {
+                        String fallback = text.getText().trim();
+                        if (!fallback.isEmpty()) sendTranslation(fallback);
+                        else if (!weakNative.isEmpty() && !weakNative.matches("[\\p{Punct}\\s]+")) sendTranslation(weakNative);
+                        else finishWithError("Teks belum terbaca. Coba pilih area sedikit lebih rapat.");
+                    })
+                    .addOnFailureListener(err -> {
+                        if (!weakNative.isEmpty() && !weakNative.matches("[\\p{Punct}\\s]+")) sendTranslation(weakNative);
+                        else finishWithError("OCR gagal: " + err.getMessage());
+                    })
+                    .addOnCompleteListener(done -> crop.recycle());
+        } catch (Exception e) {
+            crop.recycle();
+            finishWithError("OCR gagal: " + e.getMessage());
         }
-        // Other visible text is context only, never to be translated automatically.
-        final int centerY = selected.centerY();
-        other.sort(Comparator.comparingInt(l -> Math.abs(l.rect.centerY() - centerY)));
-        ArrayList<Line> near = new ArrayList<>();
-        for (Line l : other) {
-            if (near.size() >= 5) break;
-            if (Math.abs(l.rect.centerY() - centerY) <= dp(390)) near.add(l);
-        }
-        near.sort(Comparator.comparingInt((Line l) -> l.rect.top).thenComparingInt(l -> l.rect.left));
-        StringBuilder vicinity = new StringBuilder();
-        for (Line l : near) { if (vicinity.length()>0) vicinity.append('\n'); vicinity.append(l.content); }
-        OCRResult result = new OCRResult(); result.target=target.toString(); result.nearby=vicinity.toString();
-        return result;
     }
 
-    private void sendTranslation(String target, String context) {
+    private static String normalizeKey(String s) {
+        return s.trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private void sendTranslation(String target) {
+        if (destroyed) return;
         if (target.trim().isEmpty()) { finishWithError("Teks kosong."); return; }
-        final String cacheKey = target.trim() + "\n##" + context.trim();
+        final String cacheKey = normalizeKey(target);
         String cached = cache.get(cacheKey);
         if (cached != null) { showTranslation(target, cached, true); return; }
-        if (cardBody != null) cardBody.setText("Menerjemahkan dengan konteks cerita ...");
+        if (cardBody != null) cardBody.setText("Menerjemahkan ...");
         final String previous = historyText();
         network.execute(() -> {
             String translation;
             try {
                 String key = new SecureKeyStore(this).load();
                 if (key.isEmpty()) throw new Exception("API key belum disimpan.");
-                translation = GeminiTranslator.translate(key, target, context, previous);
+                translation = GeminiTranslator.translate(key, target, previous);
             } catch (Exception e) {
                 final String message = e.getMessage() == null ? "Gagal menghubungi AI." : e.getMessage();
-                handler.post(() -> finishWithError(message)); return;
+                handler.post(() -> { if (!destroyed) finishWithError(message); }); return;
             }
             final String result = translation;
             handler.post(() -> {
+                if (destroyed) return;
                 cache.put(cacheKey, result);
-                history.addFirst("Inggris: " + target + "\nIndonesia: " + result);
-                while (history.size() > 3) history.removeLast();
+                history.addFirst(clip(target, 220) + " => " + clip(result, 220));
+                while (history.size() > 2) history.removeLast();
                 showTranslation(target, result, false);
             });
         });
     }
+    private static String clip(String s, int max) { return s.length() > max ? s.substring(0, max) : s; }
     private String historyText() {
         StringBuilder historyText = new StringBuilder();
-        for (String item : history) historyText.append(item).append("\n---\n");
+        for (String item : history) historyText.append(item).append('\n');
         return historyText.toString();
     }
     private void showTranslation(String source, String result, boolean cached) {
@@ -386,14 +394,16 @@ public final class ScreenTranslatorService extends Service {
     }
     private void safeRemove(View view) { try { wm.removeView(view); } catch (Exception ignored) { } }
     @Override public void onDestroy() {
-        busy=false; removeSelector(); hideCard();
+        destroyed = true; busy=false; removeSelector(); hideCard();
         if(trigger != null) { safeRemove(trigger); trigger=null; }
         releaseScreenshot();
         if (virtualDisplay != null) { virtualDisplay.release(); virtualDisplay=null; }
         if (reader != null) { reader.close(); reader=null; }
         if (projection != null) { MediaProjection p=projection; projection=null; p.stop(); }
-        if(recognizer != null) recognizer.close();
-        network.shutdownNow();
+        if(recognizer != null) { recognizer.close(); recognizer=null; }
+        // Free the OCR models (~10 MB) once any running OCR/translation has finished.
+        network.execute(NativePaddleOcr::release);
+        network.shutdown();
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent) { return null; }

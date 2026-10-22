@@ -1,0 +1,11 @@
+.gradle/
+.idea/
+*.iml
+local.properties
+**/build/
+/artifact/
+apk-listing.txt
+# Fetched by scripts/prepare_native_ocr.py (SHA-256 pinned) during the build
+app/src/main/assets/PP_OCRv5_*
+app/src/main/cpp/ppocrv5_dict.h
+app/src/main/cpp/third_party/

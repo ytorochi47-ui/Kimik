@@ -14,23 +14,45 @@ public final class GeminiTranslator {
     public static final String MODEL = "gemini-3.5-flash-lite";
     private GeminiTranslator() { }
 
-    public static String translate(String apiKey, String selected, String nearby, String history) throws Exception {
-        if (selected.trim().isEmpty()) throw new IllegalArgumentException("Dialog belum terbaca.");
-        String instruction = "Kamu editor penerjemahan webtoon bahasa Inggris ke Indonesia. " +
-                "Terjemahkan DIALOG TARGET secara utuh ke bahasa Indonesia yang mengalir, natural, sesuai emosi dan karakter, " +
-                "dengan gaya percakapan komik. Jangan kaku, jangan terlalu gaul bila sumbernya serius. " +
-                "Jaga nama, istilah, humor, nada, dan ambiguitas. Jangan mengarang gender, relasi, " +
-                "alur, atau informasi yang tidak terbukti. Konteks di layar hanya petunjuk, BUKAN teks yang harus diterjemahkan. " +
-                "Riwayat yang pernah dipilih pengguna belum tentu berurutan. Jika OCR keliru dan " +
-                "perbaikannya jelas, koreksi secara konservatif. Jawab HANYA terjemahan target dalam bahasa Indonesia.";
-        String prompt = "DIALOG TARGET:\n" + limit(selected, 2200) +
-                "\n\nKONTEKS TEKS LAIN YANG TERLIHAT DI LAYAR (mungkin tidak berurutan):\n" + limit(nearby, 1200) +
-                "\n\nRIWAYAT PILIHAN TERDAHULU (tidak selalu kronologis):\n" + limit(history, 1700);
+    private static final String SYSTEM = "Kamu penerjemah webtoon Inggris ke Indonesia. " +
+            "Terjemahkan teks dialog secara utuh: natural, mengalir, sesuai emosi dan karakter, gaya percakapan komik. " +
+            "Pertahankan nama, istilah, humor, dan nada; jangan mengarang gender, relasi, atau alur. " +
+            "Teks berasal dari OCR dan mungkin ada huruf keliru; koreksi hanya bila jelas. " +
+            "Jawab HANYA terjemahannya.";
+
+    /** Sends text only (never an image). {@code history} may be empty. */
+    public static String translate(String apiKey, String text, String history) throws Exception {
+        if (text == null || text.trim().isEmpty()) throw new IllegalArgumentException("Dialog belum terbaca.");
+        String clean = limit(text.trim(), 1500);
+        StringBuilder prompt = new StringBuilder();
+        if (history != null && !history.trim().isEmpty())
+            prompt.append("Dialog sebelumnya (hanya untuk konteks, tidak berurutan):\n")
+                  .append(limit(history.trim(), 700)).append("\n\n");
+        prompt.append("Terjemahkan:\n").append(clean);
+        // Headroom matters: on thinking-capable models, reasoning tokens count against this cap.
+        int maxTokens = Math.max(300, Math.min(800, clean.length() + 200));
 
         JSONObject request = new JSONObject();
-        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", instruction))));
-        request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt)))));
-        request.put("generationConfig", new JSONObject().put("temperature", 0.25).put("maxOutputTokens", 800));
+        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", SYSTEM))));
+        request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt.toString())))));
+        request.put("generationConfig", new JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens));
+        return post(apiKey, request);
+    }
+
+    private static String post(String apiKey, JSONObject request) throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try { return postOnce(apiKey, request); }
+            catch (RetryableException e) { last = e; try { Thread.sleep(1200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; } }
+        }
+        throw last == null ? new Exception("Gagal menghubungi Gemini.") : last;
+    }
+
+    private static final class RetryableException extends Exception {
+        RetryableException(String m) { super(m); }
+    }
+
+    private static String postOnce(String apiKey, JSONObject request) throws Exception {
         HttpURLConnection conn = (HttpURLConnection)new URL("https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent").openConnection();
         try {
             conn.setRequestMethod("POST"); conn.setConnectTimeout(9000); conn.setReadTimeout(20000);
@@ -47,6 +69,7 @@ public final class GeminiTranslator {
                 try { msg = new JSONObject(response).getJSONObject("error").optString("message", msg); }
                 catch (Exception ignored) { }
                 if (status == 429) throw new Exception("Kuota gratis/rate limit habis (429). Coba lagi nanti.");
+                if (status == 500 || status == 503) throw new RetryableException("Server Gemini sibuk (" + status + "). Coba lagi.");
                 throw new Exception("Gemini API: " + limit(msg, 220));
             }
             JSONArray candidates = new JSONObject(response).optJSONArray("candidates");

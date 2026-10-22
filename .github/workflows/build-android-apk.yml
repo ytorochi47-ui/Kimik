@@ -3,7 +3,11 @@ name: Build Android APK (Free)
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, 'upgrade/**']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,7 +15,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,7 +25,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          
+
       - name: Install Android SDK tools
         uses: android-actions/setup-android@v4
         with:
@@ -30,6 +34,12 @@ jobs:
       - name: Install Android platform
         run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
 
+      - name: Install native build tools
+        run: sdkmanager --install 'ndk;27.3.13750724' 'cmake;3.22.1'
+
+      - name: Prepare PP-OCRv5 models and libraries
+        run: python3 scripts/prepare_native_ocr.py
+
       - name: Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -37,6 +47,24 @@ jobs:
 
       - name: Compile signed debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Verify APK contents
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          unzip -l "$APK" > apk-listing.txt
+          cat apk-listing.txt | grep -E 'libwebtoonocr.so|PP_OCRv5|classes' || true
+          for abi in arm64-v8a armeabi-v7a; do
+            grep -q "lib/$abi/libwebtoonocr.so" apk-listing.txt || { echo "missing native lib for $abi"; exit 1; }
+          done
+          for f in PP_OCRv5_mobile_det.ncnn.param PP_OCRv5_mobile_det.ncnn.bin PP_OCRv5_mobile_rec.ncnn.param PP_OCRv5_mobile_rec.ncnn.bin; do
+            grep -q "assets/$f" apk-listing.txt || { echo "missing model asset $f"; exit 1; }
+          done
+          # Models must be stored uncompressed so they can be memory-mapped.
+          unzip -v "$APK" 'assets/*.bin' | awk '/assets/ && $2 != "Stored" {print "compressed asset: " $0; bad=1} END {exit bad}'
+          # No Gemini key may ever ship inside the APK or the sources.
+          mkdir -p /tmp/apkx && unzip -q -o "$APK" -d /tmp/apkx
+          if grep -rIl 'AIza[0-9A-Za-z_-]\{30,\}' /tmp/apkx app .github scripts 2>/dev/null; then echo "API key pattern found"; exit 1; fi
+          ls -l "$APK"
 
       - name: Make downloadable APK
         run: |
