@@ -46,7 +46,26 @@ jobs:
           gradle-version: '8.10.2'
 
       - name: Compile signed debug APK
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug 2>&1 | tee build.log
+
+      - name: Show build errors in the run summary
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path('build.log')
+          lines = p.read_text(errors='replace').splitlines() if p.exists() else ['build.log missing']
+          keep = set()
+          for i, l in enumerate(lines):
+              if re.search(r'error|FAILED|What went wrong|Caused by|CMake Error|undefined|fatal', l, re.I):
+                  keep.update(range(max(0, i - 2), min(len(lines), i + 4)))
+          picked = [lines[i] for i in sorted(keep)][:160] + ['--- tail ---'] + lines[-60:]
+          msg = '\n'.join(picked)[-30000:]
+          msg = msg.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::error title=Gradle build log::' + msg)
+          PY
 
       - name: Verify APK contents
         run: |
