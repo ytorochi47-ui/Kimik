@@ -2,8 +2,9 @@ package id.rexz.webtoonlite;
 
 /** Rate limit + backoff for Gemini calls (offline, quota). Time is passed in so it is unit-testable. */
 final class ApiGate {
-    static final long MIN_INTERVAL_MS = 2000;
-    static final long QUOTA_BLOCK_MS = 60_000;
+    /** Free tier allows 15 requests/minute; 5 s apart keeps us at 12. */
+    static final long MIN_INTERVAL_MS = 5000;
+    static final long MIN_QUOTA_BLOCK_MS = 15_000;
     static final long OFFLINE_BASE_MS = 4000, OFFLINE_MAX_MS = 30_000;
 
     private long blockedUntil;
@@ -17,7 +18,8 @@ final class ApiGate {
 
     void onSuccess() { failures = 0; blockedUntil = 0; }
 
-    void onQuotaExceeded(long now) { blockedUntil = now + QUOTA_BLOCK_MS; }
+    /** HTTP 429: pause for what Google asked (retryDelay) or until the daily reset. */
+    void onQuotaExceeded(long now, long blockMs) { blockedUntil = now + Math.max(MIN_QUOTA_BLOCK_MS, blockMs); }
 
     /** Offline / timeout: 4 s, 8 s, 16 s, 30 s ... */
     void onOffline(long now) {

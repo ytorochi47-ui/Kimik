@@ -125,6 +125,22 @@ public class RealtimeSmokeTest {
             ok = false; report.append("EXCEPTION parseBatch ").append(Log.getStackTraceString(t)).append('\n');
         }
 
+        // ---- 429 bodies: per-minute vs per-day limit
+        try {
+            GeminiTranslator.QuotaExceededException minute = GeminiTranslator.quotaError(
+                    "{\"error\":{\"code\":429,\"message\":\"quota\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.QuotaFailure\","
+                    + "\"violations\":[{\"quotaId\":\"GenerateRequestsPerMinutePerProjectPerModel-FreeTier\"}]},"
+                    + "{\"@type\":\"type.googleapis.com/google.rpc.RetryInfo\",\"retryDelay\":\"34s\"}]}}", "x");
+            GeminiTranslator.QuotaExceededException day = GeminiTranslator.quotaError(
+                    "{\"error\":{\"code\":429,\"message\":\"quota\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.QuotaFailure\","
+                    + "\"violations\":[{\"quotaId\":\"GenerateRequestsPerDayPerProjectPerModel-FreeTier\"}]}]}}", "x");
+            boolean q = !minute.daily && minute.retryAfterMs == 34000 && day.daily && GeminiTranslator.quotaError("garbage", "x").retryAfterMs == 0;
+            ok &= q;
+            report.append(q ? "OK   " : "FAIL ").append("429 classification: ").append(minute.getMessage()).append(" | ").append(day.getMessage()).append('\n');
+        } catch (Throwable t) {
+            ok = false; report.append("EXCEPTION quota ").append(Log.getStackTraceString(t)).append('\n');
+        }
+
         // ---- overlay layout: long Indonesian text must fit inside the screen and keep its font readable
         try {
             final boolean[] layoutOk = {false};

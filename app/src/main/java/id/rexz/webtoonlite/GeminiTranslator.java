@@ -52,7 +52,39 @@ public final class GeminiTranslator {
 
     /** Thrown for HTTP 429 so callers can back off instead of retrying. */
     public static final class QuotaExceededException extends Exception {
-        QuotaExceededException(String m) { super(m); }
+        /** How long Google asked us to wait (0 = unknown) and whether it is the per-day limit. */
+        final long retryAfterMs; final boolean daily;
+        QuotaExceededException(String m, long retryAfterMs, boolean daily) { super(m); this.retryAfterMs = retryAfterMs; this.daily = daily; }
+    }
+
+    /** Turns a 429 body into a specific, actionable exception (per-minute vs per-day limit). */
+    static QuotaExceededException quotaError(String response, String fallbackMsg) {
+        long retryMs = 0; boolean daily = false;
+        try {
+            JSONObject err = new JSONObject(response).getJSONObject("error");
+            JSONArray details = err.optJSONArray("details");
+            for (int i = 0; details != null && i < details.length(); i++) {
+                JSONObject d = details.getJSONObject(i);
+                String type = d.optString("@type", "");
+                if (type.endsWith("RetryInfo")) retryMs = QuotaClock.parseRetryDelayMs(d.optString("retryDelay", ""));
+                JSONArray violations = d.optJSONArray("violations");
+                for (int j = 0; violations != null && j < violations.length(); j++) {
+                    String id = violations.getJSONObject(j).optString("quotaId", "") + violations.getJSONObject(j).optString("quotaMetric", "");
+                    if (id.toLowerCase().contains("perday")) daily = true;
+                }
+            }
+            if (err.optString("message", "").toLowerCase().contains("per day")) daily = true;
+        } catch (Exception ignored) { }
+        long now = System.currentTimeMillis();
+        String msg;
+        if (daily) {
+            msg = "Kuota harian Gemini habis (batas gratis ±" + QuotaTracker.DAILY_LIMIT + " permintaan/hari). Reset sekitar "
+                    + QuotaClock.clock(QuotaClock.nextResetMs(now), java.time.ZoneId.systemDefault()) + ".";
+        } else {
+            long secs = Math.max(10, (retryMs + 999) / 1000);
+            msg = "Batas per menit Gemini tercapai (gratis: 15/menit). Coba lagi sekitar " + secs + " detik.";
+        }
+        return new QuotaExceededException(msg, retryMs, daily);
     }
 
     /** Thrown when {@link CancelToken#cancel()} aborted the request. */
@@ -165,7 +197,7 @@ public final class GeminiTranslator {
                 String msg = "HTTP " + status;
                 try { msg = new JSONObject(response).getJSONObject("error").optString("message", msg); }
                 catch (Exception ignored) { }
-                if (status == 429) throw new QuotaExceededException("Kuota gratis/rate limit habis (429). Coba lagi nanti.");
+                if (status == 429) throw quotaError(response, msg);
                 if (status == 500 || status == 503) throw new RetryableException("Server Gemini sibuk (" + status + "). Coba lagi.");
                 throw new Exception("Gemini API: " + limit(msg, 220));
             }

@@ -154,6 +154,7 @@ public final class OcrTranslator {
             try {
                 String key = new SecureKeyStore(appContext).load();
                 if (key.isEmpty()) throw new Exception("API key belum disimpan.");
+                QuotaTracker.record(appContext);
                 translation = GeminiTranslator.translate(key, target, previous);
             } catch (Exception e) {
                 final String message = e.getMessage() == null ? "Gagal menghubungi AI." : e.getMessage();

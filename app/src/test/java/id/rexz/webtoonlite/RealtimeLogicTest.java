@@ -165,9 +165,9 @@ public class RealtimeLogicTest {
     @Test public void apiIsRateLimitedAndBacksOffOnQuotaAndOffline() {
         ApiGate g = new ApiGate();
         assertEquals(0, g.waitMs(1000, 0));
-        assertEquals(1500, g.waitMs(1500, 1000));                              // 2 s between requests
-        g.onQuotaExceeded(5000);
-        assertEquals(59000, g.waitMs(6000, 1000));                             // quota: 60 s pause
+        assertEquals(4500, g.waitMs(1500, 1000));                              // 5 s apart = 12/min, under the free 15 RPM
+        g.onQuotaExceeded(5000, 60000);
+        assertEquals(59000, g.waitMs(6000, 1000));                             // quota: wait what Google asked
         assertTrue(g.isBlocked(6000));
         g.onSuccess();
         assertEquals(0, g.waitMs(10000, 1000));
@@ -197,5 +197,21 @@ public class RealtimeLogicTest {
         assertEquals(a.areaKey(), moved.areaKey());
         assertFalse(a.areaKey().equals(bigger.areaKey()));
         assertEquals(a.key, bigger.key);                                         // translation cache is by text
+    }
+
+    @Test public void quotaWindowsFollowThePacificDay() {
+        long now = java.time.Instant.parse("2026-10-22T10:35:00Z").toEpochMilli();            // 03:35 PDT on Oct 22
+        assertEquals("2026-10-22", QuotaClock.dayKey(now));
+        assertEquals(java.time.Instant.parse("2026-10-23T07:00:00Z").toEpochMilli(), QuotaClock.nextResetMs(now));
+        assertEquals("14:00", QuotaClock.clock(QuotaClock.nextResetMs(now), java.time.ZoneId.of("Asia/Jakarta")));
+        assertEquals("2026-10-21", QuotaClock.dayKey(java.time.Instant.parse("2026-10-22T06:59:00Z").toEpochMilli()));
+    }
+
+    @Test public void retryDelayStringsAreParsed() {
+        assertEquals(34000, QuotaClock.parseRetryDelayMs("34s"));
+        assertEquals(34500, QuotaClock.parseRetryDelayMs("34.5s"));
+        assertEquals(60000, QuotaClock.parseRetryDelayMs("1m"));
+        assertEquals(0, QuotaClock.parseRetryDelayMs("soon"));
+        assertEquals(0, QuotaClock.parseRetryDelayMs(null));
     }
 }

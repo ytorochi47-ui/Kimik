@@ -439,6 +439,12 @@ final class RealtimeEngine {
                 RealtimeConfig.BATCH_MAX_ITEMS, RealtimeConfig.BATCH_MAX_CHARS);
         if (items.isEmpty()) return;                       // everything is already on its way
         long now = SystemClock.uptimeMillis();
+        int usedToday = QuotaTracker.used(appContext);
+        if (usedToday >= QuotaTracker.REALTIME_CEILING) {     // keep the last part of the free daily budget for T / camera
+            host.status("Kuota harian hampir habis (" + usedToday + "/" + QuotaTracker.DAILY_LIMIT + "), realtime berhenti menerjemahkan "
+                    + "sampai ±" + QuotaClock.clock(QuotaClock.nextResetMs(System.currentTimeMillis()), java.time.ZoneId.systemDefault()));
+            return;
+        }
         if (apiBusy) {
             // A request for an old screen holds the slot: abort it, its answer is no longer needed here.
             boolean needed = false;
@@ -460,6 +466,7 @@ final class RealtimeEngine {
 
     private void send(List<BatchPlanner.Item> items, long now) {
         apiBusy = true;
+        QuotaTracker.record(appContext);
         final int reqId = activeReq = ++reqSeq;
         lastSentAt = now;
         inFlightEpoch = epoch;
@@ -489,7 +496,15 @@ final class RealtimeEngine {
         long now = SystemClock.uptimeMillis();
         if (error != null) {
             if (error instanceof GeminiTranslator.QuotaExceededException) {
-                gate.onQuotaExceeded(now); blockedText = "Kuota Gemini habis — jeda 60 dtk";
+                GeminiTranslator.QuotaExceededException q = (GeminiTranslator.QuotaExceededException) error;
+                long wall = System.currentTimeMillis();
+                if (q.daily) {
+                    gate.onQuotaExceeded(now, QuotaClock.nextResetMs(wall) - wall);
+                    blockedText = "Kuota harian habis — lanjut ±" + QuotaClock.clock(QuotaClock.nextResetMs(wall), java.time.ZoneId.systemDefault());
+                } else {
+                    gate.onQuotaExceeded(now, q.retryAfterMs);
+                    blockedText = "Batas per menit — jeda " + Math.max(15, (q.retryAfterMs + 999) / 1000) + " dtk";
+                }
                 if (state == State.RUNNING) host.status(blockedText);
             } else if (!current || error instanceof GeminiTranslator.CancelledException) {
                 if (current && state == State.RUNNING) host.status("");
