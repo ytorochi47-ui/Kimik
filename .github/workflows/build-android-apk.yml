@@ -35,10 +35,7 @@ jobs:
         run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
 
       - name: Install native build tools
-        run: |
-          sdkmanager --list 2>/dev/null | grep -oE 'ndk;[0-9.]+' | sort -uV | tr '\n' ' ' > ndk-list.txt || true
-          echo "::notice title=Available NDKs::$(cat ndk-list.txt)"
-          sdkmanager --install 'ndk;30.0.16248370' 'cmake;3.22.1'
+        run: sdkmanager --install 'ndk;30.0.16248370' 'cmake;3.22.1'
 
       - name: Prepare PP-OCRv5 models and libraries
         run: python3 scripts/prepare_native_ocr.py
@@ -87,6 +84,9 @@ jobs:
           mkdir -p /tmp/apkx && unzip -q -o "$APK" -d /tmp/apkx
           if grep -rIl 'AIza[0-9A-Za-z_-]\{30,\}' /tmp/apkx app .github scripts 2>/dev/null; then echo "API key pattern found"; exit 1; fi
           ls -l "$APK"
+          SIZE=$(stat -c %s "$APK")
+          LIBS=$(grep -E 'lib/.*/libwebtoonocr.so' apk-listing.txt | awk '{print $1" bytes "$4}' | tr '\n' ';')
+          echo "::notice title=APK size::${SIZE} bytes | native libs: ${LIBS}"
 
       - name: Make downloadable APK
         run: |
@@ -101,3 +101,68 @@ jobs:
           path: artifact/
           if-no-files-found: error
           retention-days: 7
+
+  smoke-test:
+    # Runs the same native code (assets -> JNI -> ncnn -> PP-OCRv5) on an x86_64 emulator
+    # (Android 11 / API 30). Not a speed benchmark for a phone; it proves the pipeline works.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android platform and native build tools
+        run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0' 'ndk;30.0.16248370' 'cmake;3.22.1'
+
+      - name: Prepare PP-OCRv5 models and libraries (x86_64)
+        run: WEBTOON_ABIS=x86_64 python3 scripts/prepare_native_ocr.py
+
+      - name: Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run native OCR smoke test on Android 11 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            gradle --no-daemon --stacktrace :app:connectedDebugAndroidTest -Pabis=x86_64 > smoke-gradle.log 2>&1 || true
+            adb logcat -d -s WebtoonSmoke:I > smoke.log || true
+
+      - name: Report smoke test result
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          def esc(t): return t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          log = pathlib.Path('smoke.log')
+          g = pathlib.Path('smoke-gradle.log')
+          body = log.read_text(errors='replace') if log.exists() else 'smoke.log missing'
+          passed = 'SMOKE RESULT: PASS' in body
+          tail = '' if passed or not g.exists() else '\n--- gradle tail ---\n' + '\n'.join(g.read_text(errors='replace').splitlines()[-80:])
+          print('::' + ('notice' if passed else 'error') + ' title=Native OCR smoke test::' + esc((body + tail)[-30000:]))
+          pathlib.Path('smoke.passed').write_text('1' if passed else '0')
+          PY
+          test "$(cat smoke.passed)" = "1"

@@ -5,6 +5,7 @@ the build instead of silently entering the APK. Nothing here needs an API key.
 Upstream code/models: nihui/ncnn-android-ppocrv5 (BSD-3-Clause, Tencent THL A29 Limited).
 """
 import hashlib
+import os
 import pathlib
 import shutil
 import time
@@ -17,7 +18,8 @@ ASSETS = ROOT / 'app/src/main/assets'
 THIRD = CPP / 'third_party'
 VERSION = '6e6240de82ca10083846b0268c4c4438e13a276e'
 BASE = f'https://raw.githubusercontent.com/nihui/ncnn-android-ppocrv5/{VERSION}/app/src/main'
-ABIS = ('arm64-v8a', 'armeabi-v7a')
+# WEBTOON_ABIS lets CI's emulator smoke test fetch x86_64 instead of the phone ABIs.
+ABIS = tuple(os.environ.get('WEBTOON_ABIS', 'arm64-v8a,armeabi-v7a').split(','))
 
 FILES = [
     (f'{BASE}/jni/ppocrv5_dict.h', CPP / 'ppocrv5_dict.h',
@@ -37,7 +39,8 @@ ARCHIVES = [
     ('https://github.com/nihui/opencv-mobile/releases/download/v37/opencv-mobile-4.14.0-android.zip', 'opencv',
      '96f120018c0acfb492721a3c45ec9ec84235a307c75600da3e70d4bfc1f0a3f5'),
 ]
-OTHER_ABIS = ('x86', 'x86_64', 'riscv64')
+ALL_ABIS = ('arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64', 'riscv64')
+OTHER_ABIS = tuple(a for a in ALL_ABIS if a not in ABIS)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -86,7 +89,7 @@ for url, name, digest in ARCHIVES:
         for member in z.namelist():
             parts = member.split('/')
             if any(p in OTHER_ABIS for p in parts):
-                continue  # only arm ABIs are built; skip x86/riscv to save CI time
+                continue  # skip ABIs that are not built to save CI time
             z.extract(member, temp)
     dirs = [p for p in temp.iterdir() if p.is_dir()]
     if len(dirs) != 1:
