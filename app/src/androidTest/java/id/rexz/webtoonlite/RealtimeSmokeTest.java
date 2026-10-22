@@ -90,6 +90,7 @@ public class RealtimeSmokeTest {
                 TextBox tight = BoxCalibration.tighten(best);
                 float coverTight = overlap(t.r, tight.left, tight.top, tight.right, tight.bottom);
                 report.append(String.format(Locale.ROOT, "         tightened h=%d w=%d coverTight=%.2f\n", tight.height(), tight.width(), coverTight));
+                ok &= coverTight >= 0.85f;                  // calibrated boxes must still cover the lettering
             }
 
             // ---- grouping on real detector output
@@ -104,6 +105,7 @@ public class RealtimeSmokeTest {
                 float best = 0f;
                 for (Truth t : truth) best = Math.max(best, overlap(t.r, d.left, d.top, d.right, d.bottom));
                 report.append(String.format(Locale.ROOT, "  dialog covers %.2f of its best truth line\n", best));
+                ok &= best >= 0.85f;
             }
             bmp.recycle();
             NativePaddleOcr.release();

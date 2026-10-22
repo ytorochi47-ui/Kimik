@@ -4,15 +4,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * PP-OCRv5's detector boxes are deliberately generous (unclipped). Overlays and grouping work on
- * boxes that hug the real lettering, so raw boxes are tightened with factors measured on the CI
- * emulator test (see NativeOcrSmokeTest "boxes" log).
+ * Raw PP-OCRv5 line boxes from the ncnn pipeline are already close to the lettering. Measured on the CI
+ * emulator test (RealtimeSmokeTest, bold sans 40-48 px): real text height = 0.89-0.98 of the raw box
+ * height, and no horizontal padding. Boxes are trimmed only slightly so the overlay still covers every
+ * glyph (an under-covering overlay would leave English visible; an over-covering one hides art).
  */
 final class BoxCalibration {
     /** Real text height as a fraction of the raw box height. */
-    static final float HEIGHT_FACTOR = 0.55f;
+    static final float HEIGHT_FACTOR = 0.95f;
     /** Horizontal padding contained in a raw box, as a fraction of the raw box height (both sides together). */
-    static final float WIDTH_PAD = 0.25f;
+    static final float WIDTH_PAD = 0.0f;
 
     private BoxCalibration() { }
 

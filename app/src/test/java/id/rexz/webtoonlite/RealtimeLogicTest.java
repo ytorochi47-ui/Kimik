@@ -105,7 +105,8 @@ public class RealtimeLogicTest {
     @Test public void calibrationShrinksGenerousDetectorBoxesAroundTheirCentre() {
         TextBox raw = box(100, 100, 500, 160, "x");
         TextBox t = BoxCalibration.tighten(raw);
-        assertTrue(t.height() < raw.height() && t.width() < raw.width());
+        assertTrue(t.height() < raw.height() && t.width() <= raw.width());
+        assertTrue(t.height() >= raw.height() * 0.85f);                       // never cuts into the lettering
         assertEquals(raw.centerY(), t.centerY(), 1f);
     }
 
