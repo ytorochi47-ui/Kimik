@@ -9,21 +9,28 @@ import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
-/** Realtime-mode fallback: ML Kit lines with boxes, used only when the native PP-OCRv5 backend is unusable. */
+
+/** Source-aware realtime OCR client, owned and closed by its worker. */
 final class MlKitBoxes {
-    private static TextRecognizer recognizer;
+    private TextRecognizer recognizer;
+    private boolean korean;
 
-    private MlKitBoxes() { }
+    MlKitBoxes() { }
 
     /** Blocking; call off the main thread. ML Kit boxes are already tight (no calibration needed). */
-    static synchronized List<TextBox> read(Bitmap bitmap) throws Exception {
-        if (recognizer == null) recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-        Text text = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)), 20, TimeUnit.SECONDS);
+    synchronized List<TextBox> read(Bitmap bitmap, boolean useKorean) throws Exception {
+        if (recognizer != null && korean != useKorean) close();
+        if (recognizer == null) {
+            korean = useKorean;
+            recognizer = useKorean ? TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build())
+                    : TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        }
+        Text text = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)));
         List<TextBox> out = new ArrayList<>();
         for (Text.TextBlock block : text.getTextBlocks())
             for (Text.Line line : block.getLines()) {
@@ -35,7 +42,7 @@ final class MlKitBoxes {
         return out;
     }
 
-    static synchronized void close() {
+    synchronized void close() {
         if (recognizer != null) { recognizer.close(); recognizer = null; }
     }
 }

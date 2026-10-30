@@ -57,6 +57,16 @@ public class RealtimeLogicTest {
         assertEquals(0f, FrameSignature.diff(a, b, mask), 0f);                  // too few points left to judge
     }
 
+    @Test public void koreanAndMixedDialogAreAccepted() {
+        assertTrue(DialogFilter.isTranslatableText("괜찮아? 오빠, 기다려!"));
+        assertTrue(DialogFilter.isTranslatableText("네!"));
+        assertTrue(DialogFilter.isTranslatableText("John, 정말이야?"));
+        assertTrue(DialogFilter.isTranslatableText("안녕"));
+        assertFalse(DialogFilter.isTranslatableText("12345 ..."));
+        assertFalse(DialogFilter.isTranslatableText("한국 https://example.com"));
+        assertTrue(OcrPolicy.looksGood("안녕하세요", .9f));
+    }
+
     // ---------------------------------------------------------------- grouping
 
     @Test public void linesOfOneBalloonBecomeOneDialog() {

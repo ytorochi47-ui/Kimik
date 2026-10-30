@@ -48,6 +48,8 @@ final class RealtimeEngine {
     }
 
     private final Context appContext;
+    private final String source;
+    private final MlKitBoxes mlKit = new MlKitBoxes();
     private final ImageReader reader;
     private final VirtualDisplay display;
     private final int screenW, screenH, topInset;
@@ -87,6 +89,7 @@ final class RealtimeEngine {
 
     RealtimeEngine(Context ctx, ImageReader reader, VirtualDisplay display, int screenW, int screenH, int topInset, Host host) {
         this.appContext = ctx.getApplicationContext();
+        source = new AppPreferences(ctx).source();
         this.reader = reader; this.display = display;
         this.screenW = screenW; this.screenH = screenH; this.topInset = topInset;
         this.host = host;
@@ -126,6 +129,7 @@ final class RealtimeEngine {
         if (state != State.RUNNING) return;
         state = State.PAUSED;
         teardown();
+        ocrExec.execute(() -> { NativePaddleOcr.release(); mlKit.close(); });
         host.status("Realtime dijeda");
     }
 
@@ -142,16 +146,16 @@ final class RealtimeEngine {
         lastDialogs = new ArrayList<>();
         baseline = null;
         host.status("");
-        ocrExec.execute(NativePaddleOcr::release);        // free the models right away
+        ocrExec.execute(() -> { NativePaddleOcr.release(); mlKit.close(); });        // free the models right away
     }
 
     /** Service shutdown: stop and free every thread. */
     void release() {
         stop();
-        ocrExec.execute(NativePaddleOcr::release);
+        ocrExec.execute(() -> { NativePaddleOcr.release(); mlKit.close(); });
         ocrExec.shutdown();
         apiExec.shutdown();
-        MlKitBoxes.close();
+
     }
 
     private void teardown() {
@@ -333,15 +337,20 @@ final class RealtimeEngine {
         });
     }
 
-    /** Runs on the OCR thread: boxes -> dialogs -> colours. PP-OCRv5 first, ML Kit only if it cannot run at all. */
+    /** Runs on the OCR thread: boxes -> dialogs -> colours. Source-aware recognition; English uses native with ML Kit fallback. */
     private List<Dialog> readDialogs(Bitmap frame, int[][] ignore) throws Exception {
         List<TextBox> boxes;
-        try {
+        boolean usedMlKit = !"en".equals(source);
+        if (!"en".equals(source)) {
+            boxes = readMlKit(frame, true);
+        } else try {
             boxes = BoxCalibration.tightenAll(NativePaddleOcr.recognizeBoxes(appContext.getAssets(), frame, RealtimeConfig.OCR_MAX_SIDE));
         } catch (Exception | UnsatisfiedLinkError nativeUnavailable) {
             android.util.Log.w("WebtoonLite", "Native OCR unavailable in realtime; using ML Kit", nativeUnavailable);
-            boxes = MlKitBoxes.read(frame);
+            boxes = readMlKit(frame, false);
+            usedMlKit = true;
         }
+        if (!usedMlKit && boxes.isEmpty()) boxes = readMlKit(frame, false);
         List<Dialog> kept = DialogFilter.keep(DialogGrouper.group(boxes, RealtimeConfig.MAX_DIALOGS), ignore);
         List<Dialog> out = new ArrayList<>(kept.size());
         for (Dialog d : kept) {
@@ -351,6 +360,22 @@ final class RealtimeEngine {
             out.add(d.offset(0, topInset));                // back to real screen coordinates
         }
         return out;
+    }
+
+    /** Bound ML Kit work too; scale boxes back to the captured frame. Worker thread only. */
+    private List<TextBox> readMlKit(Bitmap frame, boolean korean) throws Exception {
+        int[] size = OcrPolicy.fitInside(frame.getWidth(), frame.getHeight(), RealtimeConfig.OCR_MAX_SIDE);
+        Bitmap small = Bitmap.createScaledBitmap(frame, size[0], size[1], true);
+        try {
+            List<TextBox> boxes = mlKit.read(small, korean);
+            float sx = (float)frame.getWidth()/small.getWidth(), sy = (float)frame.getHeight()/small.getHeight();
+            List<TextBox> scaled = new ArrayList<>();
+            for (TextBox b : boxes) scaled.add(new TextBox(Math.round(b.left*sx), Math.round(b.top*sy),
+                    Math.round(b.right*sx), Math.round(b.bottom*sy), b.conf, b.text));
+            return scaled;
+        } catch (Exception e) {
+            throw new Exception("Model OCR belum siap. Hubungkan internet untuk mengunduh model, lalu coba lagi.");
+        } finally { if (small != frame) small.recycle(); }
     }
 
     /** Median colour of a thin ring just outside the dialog: that is the balloon / caption background. */
@@ -375,6 +400,7 @@ final class RealtimeEngine {
 
     private void onOcrFailed(int myEpoch, String message) {
         ocrBusy = false;
+        if (state == State.OFF) return; // A late OCR callback must not schedule on a released executor.
         scheduleModelRelease();
         if (state != State.RUNNING) return;
         host.status("OCR gagal: " + message);
@@ -386,6 +412,7 @@ final class RealtimeEngine {
 
     private void onOcrDone(int myEpoch, List<Dialog> dialogs) {
         ocrBusy = false;
+        if (state == State.OFF) return; // A late OCR callback must not schedule on a released executor.
         scheduleModelRelease();
         if (state != State.RUNNING) return;
         if (myEpoch != epoch) {                            // the screen moved while we were reading
@@ -405,7 +432,7 @@ final class RealtimeEngine {
     private final Runnable releaseRunnable = new Runnable() {
         @Override public void run() {
             if (ocrBusy) { main.postDelayed(this, RealtimeConfig.MODEL_IDLE_RELEASE_MS); return; }
-            ocrExec.execute(NativePaddleOcr::release);
+            ocrExec.execute(() -> { NativePaddleOcr.release(); mlKit.close(); });
         }
     };
 
@@ -481,9 +508,9 @@ final class RealtimeEngine {
         apiExec.execute(() -> {
             Map<Integer, String> result = null; Throwable error = null;
             try {
-                String key = new SecureKeyStore(appContext).load();
+                String key = AppPreferences.requireKey(appContext);
                 if (key.isEmpty()) throw new Exception("API key belum disimpan.");
-                result = GeminiTranslator.translateBatch(key, ids, texts, context, tk);
+                result = GeminiTranslator.translateBatch(key, ids, texts, context, tk, source);
             } catch (Throwable t) { error = t; }
             final Map<Integer, String> res = result; final Throwable err = error;
             main.post(() -> onBatchDone(reqId, items, res, err));

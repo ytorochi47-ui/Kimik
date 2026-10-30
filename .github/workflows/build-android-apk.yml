@@ -94,13 +94,13 @@ jobs:
       - name: Make downloadable APK
         run: |
           mkdir -p artifact
-          cp app/build/outputs/apk/debug/app-debug.apk artifact/WebtoonLite-debug.apk
-          sha256sum artifact/WebtoonLite-debug.apk > artifact/SHA256SUMS.txt
+          cp app/build/outputs/apk/debug/app-debug.apk artifact/Kimik-debug.apk
+          sha256sum artifact/Kimik-debug.apk > artifact/SHA256SUMS.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: WebtoonLite-Android11-APK
+          name: Kimik-Android11-APK
           path: artifact/
           if-no-files-found: error
           retention-days: 7
@@ -151,7 +151,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            gradle --no-daemon --stacktrace :app:connectedDebugAndroidTest -Pabis=x86_64 > smoke-gradle.log 2>&1 || true
+            gradle --no-daemon --stacktrace :app:connectedDebugAndroidTest -Pabis=x86_64 > smoke-gradle.log 2>&1 && echo 0 > smoke.exit || echo 1 > smoke.exit
             adb logcat -d -s WebtoonSmoke:I > smoke.log || true
 
       - name: Report smoke test result
@@ -163,7 +163,8 @@ jobs:
           log = pathlib.Path('smoke.log')
           g = pathlib.Path('smoke-gradle.log')
           body = log.read_text(errors='replace') if log.exists() else 'smoke.log missing'
-          passed = 'SMOKE RESULT: PASS' in body and 'REALTIME RESULT: PASS' in body
+          exit_file = pathlib.Path('smoke.exit')
+          passed = exit_file.exists() and exit_file.read_text().strip() == '0' and 'SMOKE RESULT: PASS' in body and 'REALTIME RESULT: PASS' in body
           tail = '' if passed or not g.exists() else '\n--- gradle tail ---\n' + '\n'.join(g.read_text(errors='replace').splitlines()[-80:])
           print('::' + ('notice' if passed else 'error') + ' title=Native OCR smoke test::' + esc((body + tail)[-30000:]))
           pathlib.Path('smoke.passed').write_text('1' if passed else '0')

@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- All important features fit the adaptive icon safe circle. -->
+    <path android:fillColor="#E5D3B9" android:pathData="M24,74 Q20,58 29,54 L40,57 L53,80 L30,81 Q24,81 24,74Z" />
+    <path android:fillColor="#BC936E" android:strokeColor="#28231F" android:strokeWidth="2.6" android:strokeLineJoin="round" android:pathData="M31,72 Q25,56 36,46 Q42,40 55,44 Q64,47 70,59 L78,72 Q82,81 70,82 L43,82 Q33,83 31,72Z" />
+    <path android:fillColor="#D7B48D" android:strokeColor="#28231F" android:strokeWidth="2.6" android:pathData="M36,45 Q31,39 35,34 Q39,30 43,35 Q50,30 59,34 Q64,30 67,35 Q70,40 65,43 L70,49 Q72,59 62,62 L43,59 Q33,56 36,45Z" />
+    <path android:fillColor="#EBD0A8" android:pathData="M54,46 Q66,43 68,50 Q70,57 62,58 L54,56Z" />
+    <path android:fillColor="#00000000" android:strokeColor="#28231F" android:strokeWidth="2.3" android:strokeLineCap="round" android:pathData="M44,44 L48,44 M61,44 L64,44 M64,50 L66,50 M58,54 Q61,56 64,54 M38,35 L39,38" />
+    <!-- Tilted phone, with two simple comic panels. -->
+    <path android:fillColor="#4E4942" android:strokeColor="#28231F" android:strokeWidth="2.3" android:strokeLineJoin="round" android:pathData="M62,57 L75,53 Q77,53 78,56 L83,72 Q84,74 81,75 L68,79Z" />
+    <path android:fillColor="#FFF3DD" android:pathData="M66,59 L75,56 L79,70 L70,73Z" />
+    <path android:fillColor="#CBB591" android:pathData="M68,60 L74,58 L75,63 L70,65Z M71,67 L76,65 L77,69 L72,71Z" />
+    <path android:fillColor="#D7B48D" android:strokeColor="#28231F" android:strokeWidth="2.5" android:strokeLineCap="round" android:pathData="M48,60 Q51,67 63,64 Q69,63 69,67 Q69,72 57,73 Q49,73 45,68 M41,77 Q47,72 54,77 L57,82 M63,81 L73,81" />
+</vector>

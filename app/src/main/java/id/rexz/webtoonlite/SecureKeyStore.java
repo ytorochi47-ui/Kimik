@@ -36,8 +36,12 @@ public final class SecureKeyStore {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, secretKey());
         byte[] ciphertext = cipher.doFinal(key.getBytes(StandardCharsets.UTF_8));
-        prefs.edit().putString("cipher", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-                .putString("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP)).apply();
+        boolean saved = prefs.edit().putString("cipher", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+                .putString("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP)).commit();
+        if (!saved) throw new java.io.IOException("Credential save failed");
+    }
+    public void delete() throws Exception {
+        if (!prefs.edit().clear().commit()) throw new java.io.IOException("Credential deletion failed");
     }
     public String load() throws Exception {
         String ct = prefs.getString("cipher", "");

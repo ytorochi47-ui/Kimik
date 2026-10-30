@@ -49,6 +49,12 @@ public final class ScreenTranslatorService extends Service {
     public static final String ACTION_STOP = "id.rexz.webtoonlite.STOP";
     public static final String EXTRA_CODE = "projection_code";
     public static final String EXTRA_DATA = "projection_data";
+    public static final String ACTION_STATE = "id.rexz.webtoonlite.STATE";
+    private static volatile boolean running;
+    public static boolean isRunning() { return running; }
+    private void publishState(boolean value) {
+        running=value; sendBroadcast(new Intent(ACTION_STATE).setPackage(getPackageName()));
+    }
     private static final int NOTIFICATION_ID = 7;
     private static final String CHANNEL = "webtoonlite_capture";
     private WindowManager wm;
@@ -56,7 +62,7 @@ public final class ScreenTranslatorService extends Service {
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader reader;
-    private OcrTranslator translator;   // shared pipeline (also used by camera mode); created in onCreate
+    private OcrTranslator translator;   // pick-dialog pipeline; created in onCreate
     private boolean destroyed;
     private TextView trigger;
     private WindowManager.LayoutParams triggerParams;
@@ -80,7 +86,7 @@ public final class ScreenTranslatorService extends Service {
         translator = new OcrTranslator(this);
         NotificationManager mgr = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) mgr.createNotificationChannel(new NotificationChannel(
-                CHANNEL, "Webtoon Lite — tangkap layar", NotificationManager.IMPORTANCE_LOW));
+                CHANNEL, "Kimik — tangkap layar", NotificationManager.IMPORTANCE_LOW));
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
@@ -91,7 +97,7 @@ public final class ScreenTranslatorService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification notification = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_search)
-                .setContentTitle("Webtoon Lite aktif")
+                .setContentTitle("Kimik aktif")
                 .setContentText("T: pilih dialog  •  R: terjemahan realtime")
                 .setContentIntent(pending).setOngoing(true).build();
         // startForegroundService() obliges us to call startForeground() within 5 s on
@@ -103,6 +109,7 @@ public final class ScreenTranslatorService extends Service {
         } catch (Exception e) { toast("Tidak dapat memulai layanan: " + e.getMessage()); stopSelf(); return START_NOT_STICKY; }
         if (projection != null) { toast("Translator sudah aktif."); return START_NOT_STICKY; }
         try {
+            AppPreferences.requireKey(this);
             int code = intent.getIntExtra(EXTRA_CODE, 0);
             Intent data = (Intent)intent.getParcelableExtra(EXTRA_DATA);
             if (code == 0 || data == null) throw new IllegalArgumentException("Izin tangkap layar tidak tersedia.");
@@ -125,6 +132,7 @@ public final class ScreenTranslatorService extends Service {
             virtualDisplay.setSurface(null);
             showTrigger();
             setupRealtime();
+            publishState(true);
         } catch (Exception e) { toast("Tidak dapat memulai tangkap layar: " + e.getMessage()); stopSelf(); }
         return START_NOT_STICKY;
     }
@@ -227,7 +235,7 @@ public final class ScreenTranslatorService extends Service {
             region.width() < 20 || region.height() < 20) {
             finishWithError("Kotak terlalu kecil."); return;
         }
-        showCard("Membaca teks dengan PP-OCRv5 ...");
+        showCard("Membaca teks ...");
         // Work ONLY on the selected region; no full-screen OCR.
         final Bitmap crop;
         try {
@@ -258,7 +266,7 @@ public final class ScreenTranslatorService extends Service {
         card.setPadding(dp(18), dp(14), dp(18), dp(10));
         card.setBackground(rounded(Color.rgb(24,32,49), 18));
         card.setElevation(dp(10));
-        TextView heading = new TextView(this); heading.setText("Webtoon Lite");
+        TextView heading = new TextView(this); heading.setText("Kimik");
         heading.setTextColor(Color.rgb(113,207,255)); heading.setTextSize(14);
         heading.setTypeface(null, Typeface.BOLD); card.addView(heading);
         cardBody = new TextView(this); cardBody.setText(content); cardBody.setTextColor(Color.WHITE);
@@ -355,6 +363,7 @@ public final class ScreenTranslatorService extends Service {
     }
     private void safeRemove(View view) { try { wm.removeView(view); } catch (Exception ignored) { } }
     @Override public void onDestroy() {
+        publishState(false);
         destroyed = true; busy=false; removeSelector(); hideCard();
         if (rt != null) { rt.release(); rt = null; }          // detaches the surface/listener first
         if (rtUi != null) { rtUi.destroy(); rtUi = null; }

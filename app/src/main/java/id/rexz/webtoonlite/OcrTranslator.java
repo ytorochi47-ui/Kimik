@@ -10,13 +10,14 @@ import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions;
 
 import java.util.LinkedList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The single OCR + translation pipeline used by BOTH modes (screenshot service and camera):
+ * The single OCR + translation pipeline used by screenshot selection:
  * cropped bitmap -> PP-OCRv5 (ncnn, CPU) -> ML Kit fallback -> Gemini (text only) -> callback.
  *
  * Call {@link #translate} from the main thread; callbacks also arrive on the main thread.
@@ -39,7 +40,9 @@ public final class OcrTranslator {
     private final LruCache<String, String> cache = new LruCache<>(64);
     private final LinkedList<String> history = new LinkedList<>();
     private TextRecognizer recognizer;   // created lazily: only the fallback path needs it
-    private boolean destroyed;
+    private final String source;
+    private volatile boolean destroyed;
+    private final GeminiTranslator.CancelToken requestToken = new GeminiTranslator.CancelToken();
     private int active;                  // jobs in flight (main thread only)
 
     private final Runnable idleRelease = new Runnable() {
@@ -47,10 +50,11 @@ public final class OcrTranslator {
             if (destroyed) return;
             if (active > 0) { handler.postDelayed(this, OCR_IDLE_RELEASE_MS); return; }
             worker.execute(NativePaddleOcr::release);
+            if (recognizer != null) { recognizer.close(); recognizer = null; }
         }
     };
 
-    public OcrTranslator(Context context) { appContext = context.getApplicationContext(); }
+    public OcrTranslator(Context context) { appContext = context.getApplicationContext(); source = new AppPreferences(context).source(); }
 
     private void scheduleIdleRelease() {
         handler.removeCallbacks(idleRelease);
@@ -62,6 +66,10 @@ public final class OcrTranslator {
         if (destroyed) { recycle(crop); return; }
         active++;
         final Bitmap work = capSize(crop);
+        if (!"en".equals(source)) {
+            runMlKitFallback(work, null, cb);
+            return;
+        }
         worker.execute(() -> {
             NativePaddleOcr.Result nat = null;
             try {
@@ -87,14 +95,15 @@ public final class OcrTranslator {
     /** Frees models, recognizer and threads. No callback is delivered afterwards. */
     public void shutdown() {
         destroyed = true;
-        handler.removeCallbacksAndMessages(null);
+        requestToken.cancel();
+        handler.removeCallbacks(idleRelease); // Pending OCR callbacks must still recycle their bitmap.
         if (recognizer != null) { recognizer.close(); recognizer = null; }
         // Free the OCR models once any running OCR/translation has finished.
         worker.execute(NativePaddleOcr::release);
         worker.shutdown();
     }
 
-    /** Large camera crops are scaled down; screen-sized crops pass through untouched. */
+    /** Large screen crops are scaled down; screen-sized crops pass through untouched. */
     private static Bitmap capSize(Bitmap src) {
         int[] size = OcrPolicy.fitInside(src.getWidth(), src.getHeight(), OcrPolicy.MAX_CROP_SIDE);
         if (size[0] == src.getWidth() && size[1] == src.getHeight()) return src;
@@ -120,7 +129,9 @@ public final class OcrTranslator {
         final String weakNative = nativeResult == null ? "" : nativeResult.text;
         try {
             if (recognizer == null)
-                recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+                recognizer = "en".equals(source)
+                        ? TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                        : TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build());
             recognizer.process(InputImage.fromBitmap(crop, 0))
                     .addOnSuccessListener(text -> {
                         if (destroyed) return;
@@ -132,9 +143,9 @@ public final class OcrTranslator {
                     .addOnFailureListener(err -> {
                         if (destroyed) return;
                         if (OcrPolicy.hasContent(weakNative)) sendTranslation(weakNative, cb);
-                        else fail(cb, "OCR gagal: " + err.getMessage());
+                        else fail(cb, "OCR belum siap. Hubungkan internet untuk mengunduh model melalui Google Play Services, lalu coba lagi.");
                     })
-                    .addOnCompleteListener(done -> recycle(crop));
+                    .addOnCompleteListener(done -> { recycle(crop); if (!destroyed) scheduleIdleRelease(); });
         } catch (Exception e) {
             recycle(crop);
             fail(cb, "OCR gagal: " + e.getMessage());
@@ -152,10 +163,11 @@ public final class OcrTranslator {
         worker.execute(() -> {
             String translation;
             try {
-                String key = new SecureKeyStore(appContext).load();
+                String key = AppPreferences.requireKey(appContext);
                 if (key.isEmpty()) throw new Exception("API key belum disimpan.");
+                if (destroyed) return;
                 QuotaTracker.record(appContext);
-                translation = GeminiTranslator.translate(key, target, previous);
+                translation = GeminiTranslator.translate(key, target, previous, source, requestToken);
             } catch (Exception e) {
                 final String message = e.getMessage() == null ? "Gagal menghubungi AI." : e.getMessage();
                 handler.post(() -> fail(cb, message));

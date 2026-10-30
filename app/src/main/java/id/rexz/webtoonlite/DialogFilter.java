@@ -17,13 +17,17 @@ final class DialogFilter {
     static boolean isTranslatableText(String text) {
         if (text == null) return false;
         String t = text.trim();
-        int letters = 0, latin = 0;
+        int letters = 0, supported = 0, hangul = 0;
         for (int i = 0; i < t.length(); i++) {
             char c = t.charAt(i);
-            if (Character.isLetter(c)) { letters++; if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) latin++; }
+            if (Character.isLetter(c)) {
+                letters++;
+                if (Character.UnicodeScript.of(c) == Character.UnicodeScript.HANGUL) { supported++; hangul++; }
+                else if (Character.UnicodeScript.of(c) == Character.UnicodeScript.LATIN) supported++;
+            }
         }
-        if (letters < 2 || latin < letters * 0.7f) return false;           // numbers, noise, non-Latin scripts
-        if (!t.matches("(?s).*\\p{L}{2,}.*")) return false;
+        if (letters == 0 || (letters < 2 && hangul == 0) || supported < letters * 0.7f) return false;
+        if (hangul == 0 && !t.matches("(?s).*\\p{L}{2,}.*")) return false;
         String low = t.toLowerCase(Locale.ROOT);
         if (low.contains("http") || low.contains("www.") || low.matches("(?s).*\\b[a-z0-9-]+\\.(com|net|org|id|co|io|app)\\b.*")) return false;
         return true;

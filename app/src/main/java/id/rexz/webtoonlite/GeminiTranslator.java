@@ -17,14 +17,22 @@ public final class GeminiTranslator {
     public static final String MODEL = "gemini-3.5-flash-lite";
     private GeminiTranslator() { }
 
-    private static final String SYSTEM = "Kamu penerjemah webtoon Inggris ke Indonesia. " +
+    private static final String SYSTEM = "Kamu penerjemah webtoon/manhwa Inggris dan Korea ke Indonesia. " +
             "Terjemahkan teks dialog secara utuh: natural, mengalir, sesuai emosi dan karakter, gaya percakapan komik. " +
-            "Pertahankan nama, istilah, humor, dan nada; jangan mengarang gender, relasi, atau alur. " +
+            "Pertahankan nama, emosi, istilah, humor, nada bicara, dan honorifik Korea bila relevan; jangan mengarang gender, relasi, atau alur. " +
             "Teks berasal dari OCR dan mungkin ada huruf keliru; koreksi hanya bila jelas. " +
             "Jawab HANYA terjemahannya.";
 
     /** Sends text only (never an image). {@code history} may be empty. */
     public static String translate(String apiKey, String text, String history) throws Exception {
+        return translate(apiKey, text, history, "auto");
+    }
+
+    public static String translate(String apiKey, String text, String history, String source) throws Exception {
+        return translate(apiKey, text, history, source, null);
+    }
+
+    public static String translate(String apiKey, String text, String history, String source, CancelToken token) throws Exception {
         if (text == null || text.trim().isEmpty()) throw new IllegalArgumentException("Dialog belum terbaca.");
         String clean = limit(text.trim(), 1500);
         StringBuilder prompt = new StringBuilder();
@@ -36,16 +44,16 @@ public final class GeminiTranslator {
         int maxTokens = Math.max(300, Math.min(800, clean.length() + 200));
 
         JSONObject request = new JSONObject();
-        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", SYSTEM))));
+        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", SYSTEM + sourceHint(source)))));
         request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt.toString())))));
         request.put("generationConfig", new JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens));
-        return post(apiKey, request, null);
+        return post(apiKey, request, token);
     }
 
     // ------------------------------------------------------------------ realtime batch (text only)
 
     private static final String BATCH_SYSTEM = SYSTEM.replace("Jawab HANYA terjemahannya.", "") +
-            "Input adalah JSON array berisi objek {\"id\":angka,\"s\":teks Inggris}. " +
+            "Input adalah JSON array berisi objek {\"id\":angka,\"s\":teks Inggris atau Korea}. " +
             "Jawab HANYA JSON array berisi objek {\"id\":angka,\"t\":terjemahan Indonesia} untuk setiap id, tanpa teks lain. " +
             "Teks bisa tersambung dengan dialog lain di layar yang sama; jaga kesinambungan nada. " +
             "Jika teks jelas bukan dialog/narasi komik (URL, menu aplikasi atau browser, jam, angka, watermark), isi t dengan string kosong.";
@@ -107,6 +115,11 @@ public final class GeminiTranslator {
      */
     public static Map<Integer, String> translateBatch(String apiKey, List<Integer> ids, List<String> texts,
                                                       String history, CancelToken token) throws Exception {
+        return translateBatch(apiKey, ids, texts, history, token, "auto");
+    }
+
+    public static Map<Integer, String> translateBatch(String apiKey, List<Integer> ids, List<String> texts,
+            String history, CancelToken token, String source) throws Exception {
         if (ids.isEmpty() || ids.size() != texts.size()) throw new IllegalArgumentException("Batch kosong.");
         JSONArray input = new JSONArray();
         int chars = 0;
@@ -123,7 +136,7 @@ public final class GeminiTranslator {
         int maxTokens = Math.max(500, Math.min(2200, (int) (chars * 1.2) + 60 * ids.size() + 250));
 
         JSONObject request = new JSONObject();
-        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", BATCH_SYSTEM))));
+        request.put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", BATCH_SYSTEM + sourceHint(source)))));
         request.put("contents", new JSONArray().put(new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt.toString())))));
         request.put("generationConfig", new JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens)
                 .put("responseMimeType", "application/json"));
@@ -222,6 +235,10 @@ public final class GeminiTranslator {
             }
             return new String(out.toByteArray(), StandardCharsets.UTF_8);
         }
+    }
+    private static String sourceHint(String source) {
+        return "ko".equals(source) ? " Bahasa sumber: Korea." : "en".equals(source)
+                ? " Bahasa sumber: Inggris." : " Kenali bahasa sumber Inggris atau Korea secara otomatis.";
     }
     private static String limit(String s, int max) { return s == null ? "" : (s.length()>max ? s.substring(0,max) : s); }
 }
